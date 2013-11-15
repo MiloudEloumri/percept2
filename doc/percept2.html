@@ -1,0 +1,192 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+<title>Module percept2</title>
+<link rel="stylesheet" type="text/css" href="stylesheet.css" title="EDoc">
+</head>
+<body bgcolor="white">
+<div class="navbar"><a name="#navbar_top"></a><table width="100%" border="0" cellspacing="0" cellpadding="2" summary="navigation bar"><tr><td><a href="overview-summary.html" target="overviewFrame">Overview</a></td><td><a href="http://www.erlang.org/"><img src="erlang.png" align="right" border="0" alt="erlang logo"></a></td></tr></table></div>
+<hr>
+
+<h1>Module percept2</h1>
+<ul class="index"><li><a href="#description">Description</a></li><li><a href="#types">Data Types</a></li><li><a href="#index">Function Index</a></li><li><a href="#functions">Function Details</a></li></ul>Percept2 - An Enhanced version of the Erlang Concurrency Profiling Tool Percept.
+
+<p><b>Behaviours:</b> <a href="application.html"><tt>application</tt></a>.</p>
+
+<h2><a name="description">Description</a></h2><p>Percept2 - An Enhanced version of the Erlang Concurrency Profiling Tool Percept.</p>
+ 
+ Percept2 extends Percept in two aspects: functionality and scalability. Among the new functionalities added to Percept are:
+  <ul>
+  <li> Scheduler activity: the number of active schedulers at any time. </li>
+  <li> Process migration information: the migration history of a process between run queues. </li>
+  <li> Statistics data about message passing between processes: the number of messages, and the average message size, sent/received by a process.</li>
+  <li> Accumulated runtime per-process: the accumulated time when a process is in a running state.</li>
+  <li> Process tree: the hierarchy structure indicating the parent-child relationships between processes.</li>
+  <li> Dynamic function call graph/count/time: the hierarchy structure showing the calling
+  relationships between functions during the program run, and the amount of time spent on a function.</li>
+  <li> Active functions: the functions that are active during a specific time interval.</li>
+  <li> Inter-node message passing: the sending of messages from one node to another.
+  </li>
+  </ul>
+  The following techniques have been used to improved the scalability of Percept.
+  <ul>
+  <li> Compressed process tree/function call graph representation: an approach to reducing the
+       number of processes/function call paths presented without losing important information.</li>
+  <li> Parallelisation of Percept: the processing of profile data has been parallelised so that multiple
+       data files can be processed at the same time </li>
+  </ul>
+ 
+  This module provides the user interface for the application.
+ 
+<h2><a name="types">Data Types</a></h2>
+
+<h3 class="typedecl"><a name="type-filespec">filespec()</a></h3>
+<p><tt>filespec() = <a href="file.html#type-filename">file:filename()</a> | {<a href="file.html#type-filename">file:filename()</a>, wrap, Suffix::string(), WrapSize::pos_integer(), WrapCnt::pos_integer()}</tt></p>
+
+
+<h3 class="typedecl"><a name="type-function_name">function_name()</a></h3>
+<p><tt>function_name() = atom()</tt></p>
+
+
+<h3 class="typedecl"><a name="type-module_name">module_name()</a></h3>
+<p><tt>module_name() = atom()</tt></p>
+
+
+<h3 class="typedecl"><a name="type-trace_profile_option">trace_profile_option()</a></h3>
+<p><tt>trace_profile_option() = procs_basic | ports_basic | procs | ports | schedulers | running | message | migration | garbage_collection | s_group | all | {callgraph, [<a href="#type-module_name">module_name()</a>]}</tt></p>
+
+
+<h2><a name="index">Function Index</a></h2>
+<table width="100%" border="1" cellspacing="0" cellpadding="2" summary="function index"><tr><td valign="top"><a href="#analyze-1">analyze/1</a></td><td>Parallel analysis of trace files.</td></tr>
+<tr><td valign="top"><a href="#analyze-4">analyze/4</a></td><td>Parallel analysis of trace files.</td></tr>
+<tr><td valign="top"><a href="#profile-2">profile/2</a></td><td>Starts the profiling while an application of interest
+      is already running.</td></tr>
+<tr><td valign="top"><a href="#profile-3">profile/3</a></td><td>The profiling starts with executing the entry function given, and goes on for
+      the whole duration until the entry function returns and the profiling
+      has concluded.</td></tr>
+<tr><td valign="top"><a href="#start_webserver-0">start_webserver/0</a></td><td>Starts webserver.</td></tr>
+<tr><td valign="top"><a href="#start_webserver-1">start_webserver/1</a></td><td>Starts webserver with a given port number.</td></tr>
+<tr><td valign="top"><a href="#stop_db-0">stop_db/0</a></td><td>Stops the percept2 database.</td></tr>
+<tr><td valign="top"><a href="#stop_profile-0">stop_profile/0</a></td><td>Stops the profiling.</td></tr>
+<tr><td valign="top"><a href="#stop_webserver-0">stop_webserver/0</a></td><td>Stops webserver.</td></tr>
+<tr><td valign="top"><a href="#stop_webserver-1">stop_webserver/1</a></td><td>Stops webserver of the given port.</td></tr>
+</table>
+
+<h2><a name="functions">Function Details</a></h2>
+
+<h3 class="function"><a name="analyze-1">analyze/1</a></h3>
+<div class="spec">
+<p><tt>analyze(FileNames::[<a href="file.html#type-filename">file:filename()</a>]) -&gt; ok | {error, any()}</tt><br></p>
+</div><p>Parallel analysis of trace files. See the <a href="overview-summary.html">Overview</a> page for examples.</p>
+
+<h3 class="function"><a name="analyze-4">analyze/4</a></h3>
+<div class="spec">
+<p><tt>analyze(Filename::<a href="file.html#type-filename">file:filename()</a>, Suffix::string(), StartIndex::pos_integer(), EndIndex::pos_integer()) -&gt; ok | {error, any()}</tt><br></p>
+</div><p>Parallel analysis of trace files. See the <a href="overview-summary.html">Overview</a> page for examples.</p>
+
+<h3 class="function"><a name="profile-2">profile/2</a></h3>
+<div class="spec">
+<p><tt>profile(FileSpec::<a href="#type-filespec">filespec()</a>, TraceProfileOptions::[<a href="#type-trace_profile_option">trace_profile_option()</a>]) -&gt; {ok, integer()} | {already_started, port()}</tt><br></p>
+</div><p>Starts the profiling while an application of interest
+      is already running.
+      The profiling can be stopped by <code>percept2:stop_profile/0</code>.
+      The valid <code>TraceProfileOptions</code> values are: <code>procs</code>, <code>ports</code>,
+      <code>schedulers</code>, <code>running</code>, <code>message</code>, <code>migration</code> and <code>all</code>. See
+      <a href="percept2.html#profile-3">profile/3</a> for the
+      descriptions of the options.</p>
+<p><b>See also:</b> <a href="#stop_profile-0">stop_profile/0</a>.</p>
+
+<h3 class="function"><a name="profile-3">profile/3</a></h3>
+<div class="spec">
+<p><tt>profile(FileSpec::<a href="#type-filespec">filespec()</a>, Entry::{<a href="#type-module_name">module_name()</a>, <a href="#type-function_name">function_name()</a>, [term()]}, TraceProfileOptions::[<a href="#type-trace_profile_option">trace_profile_option()</a>]) -&gt; ok | {already_started, port()}</tt><br></p>
+</div><p><p>The profiling starts with executing the entry function given, and goes on for
+      the whole duration until the entry function returns and the profiling
+      has concluded. The events to be traced/profiled depends on the options
+      specified by <code>TraceProfileOptions</code>. The following options are available:</p>
+ 
+     <p>-- <code>procs_basic</code>       : only profile basic process activities including                              
+spawn, exit, register. Other activiites including                              
+unregister, link, unlink, getting_linked, and                              
+getting_unlinked, are traced but not profiled.</p>
+ 
+     <p>-- <code>procs</code>             : enable `procs_baisc', but also profile the                              
+runnablity of processes.</p>
+ 
+     <p>-- <code>ports_basic</code>       : only profile basic port activities: open and close.</p>
+ 
+     <p>-- <code>ports</code>             : enable <code>ports_basic</code>, but also profile the                              
+runnablity of ports.</p>
+ 
+     <p>-- <code>schedulers</code>        : enable the profiling of scheduler concurrency.</p>
+ 
+     <p>-- <code>running</code>           : enable the feature to distinguish running from
+                              runnable process states. If the <code>procs</code> option is                              
+not given, this option enables the process concurrency                              
+automatically.</p>
+ 
+     <p>-- <code>message</code>           : enable the profiling of message passing between
+                              processes; This option enables <code>procs_basic</code> automically.</p>
+ 
+     <p>-- <code>migration</code>         : enable the profiling of process migration between
+                              schedulers; this option enables <code>procs</code> automatically.</p>
+ 
+     <p>-- <code>garbage_collection</code>: enable the profiling of garbage collection. This</p>
+ 
+     <p>-- <code>s_group</code>           : enable the profiling of s_group-related activities, including                              
+the creation/deletion of s_groups as well adding/removing nodes                              
+to/from a s_group.</p>
+ 
+     <p>-- <code>all</code>               : enable all the previous options apart from <code>s_group</code>.</p>
+ 
+     <p>-- <code>{callgraph, Mods}</code> : enable the profiling of function activities
+                               (<code>call</code> and <code>return_to</code>) of functions defined in <code>Mods</code>.
+                               This option enables <code>procs_basic</code> automatically. Given the huge
+                               amount of data that could possibly be produced when this
+                               feature is on, we do not recommend profiling many modules
+                               in one go at this stage. We are in the process of improving
+                               the performance of this feature. This feature should not be
+                               used when <code>s_group</code> is enabled, since the latter needs to                               
+record the actual arguments of function calls.</p>
+ 
+  See the <a href="overview-summary.html">Overview</a> page for examples.</p>
+
+<h3 class="function"><a name="start_webserver-0">start_webserver/0</a></h3>
+<div class="spec">
+<p><tt>start_webserver() -&gt; {started, Hostname, Port} | {error, Reason}</tt>
+<ul class="definitions"><li><tt>Hostname = string()</tt></li><li><tt>Port = integer()</tt></li><li><tt>Reason = term()</tt></li></ul></p>
+</div><p>Starts webserver. An available port number will be assigned by inets.</p>
+
+<h3 class="function"><a name="start_webserver-1">start_webserver/1</a></h3>
+<div class="spec">
+<p><tt>start_webserver(Port::integer()) -&gt; {started, Hostname, AssignedPort} | {error, Reason}</tt>
+<ul class="definitions"><li><tt>Hostname = string()</tt></li><li><tt>AssignedPort = integer()</tt></li><li><tt>Reason = term()</tt></li></ul></p>
+</div><p>Starts webserver with a given port number. If port number is 0, an available port number will
+ 	be assigned by inets.</p>
+
+<h3 class="function"><a name="stop_db-0">stop_db/0</a></h3>
+<div class="spec">
+<p><tt>stop_db() -&gt; ok</tt><br></p>
+</div><p>Stops the percept2 database.</p>
+
+<h3 class="function"><a name="stop_profile-0">stop_profile/0</a></h3>
+<div class="spec">
+<p><tt>stop_profile() -&gt; ok | {error, not_started}</tt><br></p>
+</div><p>Stops the profiling.</p>
+<p><b>See also:</b> <a href="#profile-1">profile/1</a>, <a href="#profile-2">profile/2</a>.</p>
+
+<h3 class="function"><a name="stop_webserver-0">stop_webserver/0</a></h3>
+<div class="spec">
+<p><tt>stop_webserver() -&gt; ok | {error, not_started}</tt><br></p>
+</div><p>Stops webserver.</p>
+
+<h3 class="function"><a name="stop_webserver-1">stop_webserver/1</a></h3>
+<div class="spec">
+<p><tt>stop_webserver(Port::integer()) -&gt; ok | {error, not_started}</tt><br></p>
+</div><p>Stops webserver of the given port.</p>
+<hr>
+
+<div class="navbar"><a name="#navbar_bottom"></a><table width="100%" border="0" cellspacing="0" cellpadding="2" summary="navigation bar"><tr><td><a href="overview-summary.html" target="overviewFrame">Overview</a></td><td><a href="http://www.erlang.org/"><img src="erlang.png" align="right" border="0" alt="erlang logo"></a></td></tr></table></div>
+<p><i>Generated by EDoc, Nov 15 2013, 15:03:34.</i></p>
+</body>
+</html>
