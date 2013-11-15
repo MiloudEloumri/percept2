@@ -48,8 +48,9 @@ The following techniques have been used to improve the scalability of Percept.
 
 <h4> Profiling </h4>
 
-There are two functions for start the profiling: <a href="percept2.html#profile-3">percept2:profile/2</a> and  
-<a href="percept2.html#profile-3">"percept2.html#percept2:profile/3</a>.  The former can be used to start the profiling while 
+There are two functions for start the profiling: <a href="percept2.html#profile-2">percept2:profile/2</a> and 
+<a href="percept2.html#profile-3">percept2:profile/3</a>. 
+The former can be used to start the profiling while 
 the application of interest is already running; and the latter can be used to profile an application run 
 from the start to the end. We take the latter case as an 
 example to explain how Percept2 works.
@@ -59,7 +60,7 @@ example to explain how Percept2 works.
               TraceProfileOptions::[trace_profile_option()]) ->
                      'ok' | {'already_started', port()}.'''
 
-The function <a href="percept2.html#profile-3">percept2:profile/3</a> takes 3 parameters. A file specification for the data destination as the first argument. The file specification can be a filename (which is the case for Percept) or a wrap file specification as what is used by the `dbg' library. If a single filename is specified, all the trace messages are saved in this file; if a wrap file specification is used, then the trace is written 
+The function <a href="percept2.html#profile-3">percept2:profile/3 </a>takes 3 parameters. A file specification for the data destination as the first argument. The file specification can be a filename (which is the case for Percept) or a wrap file specification as what is used by the `dbg' library. If a single filename is specified, all the trace messages are saved in this file; if a wrap file specification is used, then the trace is written 
 to a limited number of files each with a limited size. The actual filenames are Filename ++ SeqCnt ++ Suffix, where SeqCnt counts as a decimal string from 0 to WrapCnt. 
 
 With the current version of Percept2, if the number of files in this wrap trace is as many as WrapCnt, the oldest file is deleted then a new file is opened to become the current (as what is described in `dbg'). For off-line profiling, this means some profiling data may get lost. We are in the process of addressing this problem, and at this stage, we assume the WrapCnt and  WrapSize are big enough to accommodate all the trace data.
@@ -139,7 +140,7 @@ In the latter case, Percept2 stores trace events to files: sim_code0.dat, sim_co
 
 The profiling will go on for the whole duration until the function sim_code:sim_code_detection/8 returns and the profiling has concluded.
 
-To analyze the data files generated, we use the function <a href="percept2:analyze-1">percept2:analyze/3</a>, which takes a list of data file names as input. This function will parse and data files in parallel, and insert all events into a RAM database. To analyse the trace data from the previous example, we run the following command:
+To analyze the data files generated, we use the function <a href="percept2.html#analyze-1">percept2:analyze/1</a>, which takes a list of data file names as input. This function will parse and data files in parallel, and insert all events into a RAM database. To analyse the trace data from the previous example, we run the following command:
 
 ```
 (test@hl-lt)2> percept2:analyze(["sim_code0.dat", "sim_code1.dat", 
