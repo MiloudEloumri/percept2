@@ -50,6 +50,8 @@
 
 -define(STOP_TIMEOUT, 1000).
 
+-compile(export_all).
+
 %%% ------------------------%%%
 %%% 	Type definitions    %%%
 %%% ------------------------%%%
@@ -73,7 +75,7 @@
 -type information_option() ::
 	all | procs | ports | pid() | port() | procs_count| ports_count.
 
--type inter_node_option() ::
+-type inter_proc_option() ::
         all |{message_acts, {node(), node(), float(), float()}}.
 
 -type inter_sched_option() ::
@@ -86,7 +88,7 @@
 
 %% @doc starts the percept database
 -spec start([file:filename()]) ->{started, [{file:filename(), pid()}]} | 
-                            {restarted, [{file:filename(), pid()}]}.
+                                 {restarted, [{file:filename(), pid()}]}.
 start(TraceFileNames) ->
     case erlang:whereis(percept2_db) of
     	undefined ->
@@ -164,6 +166,7 @@ stop_sync(Pid)->
             end
     end.
 
+-spec stop_percept_db([{filename(), pid()}]) -> stopped.
 stop_percept_db(FileNameSubDBPairs) ->
     ok = stop_percept_sub_dbs(FileNameSubDBPairs),
     ets:delete(pdb_warnings),
@@ -172,8 +175,10 @@ stop_percept_db(FileNameSubDBPairs) ->
     ets:delete(funcall_info),
     ets:delete(fun_calltree),
     ets:delete(fun_info),
-    ets:delete(inter_node),
+    ets:delete(inter_proc),
     ets:delete(inter_sched),
+    ets:delete(s_group),
+    %% ets:delete(msg_queue_len),
     case ets:info(history_html) of
         undefined -> 
             stopped;
@@ -222,19 +227,20 @@ insert(SubDB, Trace) ->
              {information, information_option()}| 
              {scheduler, scheduler_option()}|
              {activity, activity_option()} |
-             {inter_node,inter_node_option()}|
+             {inter_node,inter_proc_option()}|
+             {inter_proc,inter_proc_option()}|
              {inter_sched, inter_sched_option()}|
              {calltime, pid_value()}|
              {code, term()} |
              {funs, term()}) ->
                     term().
-                  
+                 
 select(Query) ->
     percept2_db ! {select, self(), Query},
     receive {result, Match} ->
             Match 
     end.
-
+-spec consolidate_db() -> ok.
 consolidate_db() ->
     percept2_db ! {action, self(), consolidate_db},
     receive
@@ -251,18 +257,24 @@ init_percept_db(Parent, TraceFileNames) ->
     process_flag(trap_exit, true),
     register(percept2_db, self()),
     ets:new(pdb_warnings, [named_table, public, {keypos, 1}, ordered_set]),
-    ets:new(pdb_info, [named_table, public, {keypos, #information.id}, set]),
+    ets:new(pdb_info, [named_table, public, {keypos, #information.id}, set, 
+                       {read_concurrency,true}, {write_concurrency,true}]),
     ets:new(pdb_system, [named_table, public, {keypos, 1}, set]),
-    ets:new(funcall_info, [named_table, public, {keypos, #funcall_info.id}, ordered_set,
-                           {read_concurrency,true}]),
-    ets:new(fun_calltree, [named_table, public, {keypos, #fun_calltree.id}, ordered_set,
-                           {read_concurrency,true}]),
+    %% Think about tis funcall_info table again!!!
+    ets:new(funcall_info, [named_table, public, {keypos, #funcall_info.id}, 
+                           ordered_set]),
+    ets:new(fun_calltree, [named_table, public, {keypos, #fun_calltree.id}, 
+                           set,{read_concurrency,true}, {write_concurrency, true}]),
     ets:new(fun_info, [named_table, public, {keypos, #fun_info.id}, 
-                       ordered_set,{read_concurrency, true}]),
-    ets:new(inter_node, [named_table, public, 
-                                 {keypos,#inter_node.timed_from_node}, ordered_set]),
+                       set,{read_concurrency, true},{write_concurrency,true}]),
+    ets:new(inter_proc, [named_table, public, 
+                         {keypos,#inter_proc.timed_from}, ordered_set]),
     ets:new(inter_sched, [named_table, public, 
                           {keypos, #inter_sched.from_sched_with_ts}, ordered_set]),
+    ets:new(s_group, [named_table, public, {keypos,#s_group.timed_node}, 
+                      ordered_set, {read_concurrency, true},
+                      {write_concurrency, true}]),                      
+    %% ets:new(msg_queue_len, [named_table, public, {keypos, #msg_queue_len.pid}, bag]),
     FileNameSubDBPairs=start_percept_sub_dbs(TraceFileNames),
     Parent!{percept2_db, started, FileNameSubDBPairs},
     loop_percept_db(FileNameSubDBPairs).
@@ -277,7 +289,7 @@ loop_percept_db(FileNameSubDBPairs) ->
             stop_percept_db(FileNameSubDBPairs),
             From ! {self(), stopped};
 	{action, From, consolidate_db} ->
-            consolidate_db(FileNameSubDBPairs),
+            ok=consolidate_db(FileNameSubDBPairs),
             From ! {percept2_db, consolidate_done},
 	    loop_percept_db(FileNameSubDBPairs);
         {operate, Pid, {Table, {Fun, Start}}} ->
@@ -397,7 +409,9 @@ percept_db_select_query(FileNameSubDBPairs, Query) ->
         {calltime, _} ->
             select_query_func(Query);
         {inter_node, _} ->
-            select_query_inter_node(Query);
+            select_query_message(Query);
+        {inter_proc, _} ->
+            select_query_message(Query);
         {inter_sched, _} ->
             select_query_inter_sched(Query);
         Unhandled ->
@@ -432,26 +446,26 @@ select_query_inter_sched(Query) ->
                       [Unhandled]),
 	    []
     end.
-select_query_inter_node(Query) ->
+select_query_message(Query) ->
     case Query of
         {inter_node, all} ->
-            Head = #inter_node{timed_from_node={'$0', '$1'},
-                               to_node = '$2',
+            Head = #inter_proc{timed_from={'$0', '$1', '$2'},
+                               to = {'$3', '_'},
                                _='_'},
-            Constraints = [],
-            Body =  [['$1', '$2']],
-            Nodes=ets:select(inter_node, [{Head, Constraints, Body}]),
-            sets:to_list(sets:from_list(lists:append(Nodes)));
-        {inter_node, {message_acts, {FromNode1, ToNode1, MinTs, MaxTs}}} ->
+            Constraints = [{'/=', '$1','$3'}],
+            Body =  [{{'$1', '$3'}}],
+            Recs=ets:select(inter_proc, [{Head, Constraints, Body}]),
+            sets:to_list(sets:from_list(Recs));
+        {inter_proc, {message_acts, {FromNode1, ToNode1, MinTs, MaxTs}}} ->
             FromNode = list_to_atom(FromNode1),
             ToNode = list_to_atom(ToNode1),
-            Head = #inter_node{timed_from_node={'$0', FromNode},
-                               to_node = ToNode,
+            Head = #inter_proc{timed_from={'$0', FromNode, '_'},
+                               to = {ToNode, '_'},
                                msg_size = '$2',
                                _='_'},
             Constraints = [{'>=', '$0', {MinTs}}, {'=<', '$0', {MaxTs}}],
             Body =  [{{'$0', '$2'}}],
-            ets:select(inter_node, [{Head, Constraints, Body}]);
+            ets:select(inter_proc, [{Head, Constraints, Body}]);
         Unhandled ->
 	    io:format("select_query_inter_node, unhandled: ~p~n", 
                       [Unhandled]),
@@ -462,9 +476,8 @@ select_query_func(Query) ->
     case Query of 
         {code, Options} when is_list(Options) ->
                       Head = #funcall_info{
-              id={'$1', '$2'}, 
-              end_ts='$3',
-              _='_'},
+                        id={'$1', '$2', '$3'}, 
+                        _='_'},
             Body =  ['$_'],
             MinTs = proplists:get_value(ts_min, Options, undefined),
             MaxTs = proplists:get_value(ts_max, Options, undefined),
@@ -474,12 +487,11 @@ select_query_func(Query) ->
             case Pids of 
                 [] ->
                     Head = #funcall_info{
-                      id={'$1', '$2'}, 
-                      end_ts='$3',
+                      id={'$1', '$2', '$3'}, 
                       _='_'},
                     ets:select(funcall_info, [{Head, Constraints, Body}]);
                 _ ->
-                    MS = [{#funcall_info{id={Pid, '$2'}, end_ts='$3', _='_'},
+                    MS = [{#funcall_info{id={Pid, '$2', '$3'}, _='_'},
                            Constraints,
                            Body} || Pid<- Pids],
                     ets:select(funcall_info, MS)
@@ -549,7 +561,10 @@ same_node_pids(_, _) -> true.
 get_node_name({_RegName, Node}) ->    
     Node;
 get_node_name(Arg) -> 
-    node(Arg).
+    try node(Arg) 
+    catch _E1:_E2 ->
+            nonode
+    end.
 
 insert_trace(SubDBIndex,Trace) ->
     case element(1, Trace) of
@@ -587,40 +602,64 @@ insert_profile_trace(SubDBIndex,Trace) ->
             %%?dbg(0, "unhandled trace: ~p~n", [_Unhandled])
             ok
     end.
-insert_profile_trace_1(SubDBIndex, Id,State,Mfa,TS, Type) ->
+
+insert_profile_trace_1(SubDBIndex, Id,State,Mfa,TS, procs) ->
+    ActProcRegName = mk_proc_reg_name("pdb_activity", SubDBIndex),
+    case check_activity_consistency(SubDBIndex, Id, State) of 
+        invalid_state ->
+            ok;
+        valid_state ->
+            InternalPid =pid2value(Id),
+            if State==active->
+                    erlang:put({active, Id}, {TS, []});
+               true ->  %% process changes to be inactive.
+                    {TS1, InOuts}=erlang:get({active, Id}),
+                    AccRunTime = calc_acc_runtime(TS1, lists:reverse(InOuts), TS),
+                    InfoProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
+                    update_information_acc_time(InfoProcRegName, {InternalPid,AccRunTime}),
+                    update_activity(ActProcRegName, {update_inouts, InternalPid, TS1, InOuts}),
+                    erlang:erase({in, Id}),
+                    erlang:erase({active, Id})
+            end,
+            ProcRC = get_runnable_count(procs, State),
+            PortRC = get({runnable, ports}),
+            update_activity(ActProcRegName,
+                            #activity{id =InternalPid,
+                                      state = State,
+                                      timestamp = TS,
+                                      runnable_procs=ProcRC,
+                                      runnable_ports=PortRC,
+                                      where = Mfa})
+    end;
+insert_profile_trace_1(SubDBIndex, Id,State,Mfa,TS, ports) ->
     ProcRegName = mk_proc_reg_name("pdb_activity", SubDBIndex),
     case check_activity_consistency(SubDBIndex, Id, State) of 
         invalid_state ->
             ok;
         valid_state ->
-            InternalId = case Type of procs ->
-                                 pid2value(Id);
-                             ports -> Id
-                         end,
-            if State==active->
-                    erlang:put({active, Id}, TS);
-               true -> 
-                    TS1=erlang:get({active, Id}),
-                    update_activity(ProcRegName, {erase, InternalId,TS1}),
-                    erlang:erase({active, Id})
-            end,
-            {ProcRC, PortRC} = case Type of 
-                                   procs ->
-                                       {get_runnable_count(procs, State),
-                                        get({runnable, ports})};
-                                   ports ->
-                                       {get({runnable, procs}),
-                                        get_runnable_count(ports, State)}
-                               end,
+            ProcRC = get({runnable, procs}),
+            PortRC = get_runnable_count(ports, State),
             update_activity(ProcRegName,
-                            #activity{id =InternalId,
+                            #activity{id =Id,
                                       state = State,
                                       timestamp = TS,
                                       runnable_procs=ProcRC,
                                       runnable_ports=PortRC,
                                       where = Mfa})
     end.
-           
+
+calc_acc_runtime(ActiveST, [], InActiveST) -> elapsed(ActiveST, InActiveST);
+calc_acc_runtime(ActiveST, [{out, TS}|InOuts], InActiveST) -> 
+    calc_acc_runtime_1([{in, ActiveST},{out,TS}|InOuts], InActiveST,0);
+calc_acc_runtime(_ActiveST, InOuts, InActiveST) ->
+    calc_acc_runtime_1(InOuts, InActiveST,0).
+
+calc_acc_runtime_1([],_InActiveST, Acc) -> Acc;
+calc_acc_runtime_1([{in, TS1}, {out, TS2}|InOuts],InActiveST, Acc) ->
+    calc_acc_runtime_1(InOuts, InActiveST, Acc+elapsed(TS1, TS2));
+calc_acc_runtime_1([{in, TS1}], InActiveST, Acc) ->
+    elapsed(TS1, InActiveST)+Acc.
+
 check_activity_consistency(SubDBIndex, Id, State) ->
     RunnableStates = erlang:get(runnable_states),
     case lists:keyfind(Id,1,RunnableStates) of 
@@ -640,18 +679,22 @@ check_activity_consistency(SubDBIndex, Id, State) ->
 
 trace_spawn(SubDBIndex, _Trace={trace_ts, Parent, spawn, Pid, Mfa, TS}) when is_pid(Pid) ->
     ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
-    InformativeMfa = mfa2informative(Mfa),
+    InformativeMfa = mfarity(mfa2informative(Mfa)),
     update_information(ProcRegName,
                        #information{id = pid2value(Pid), start = TS,
                                     parent = pid2value(Parent), entry = InformativeMfa}),
     update_information_child(ProcRegName, pid2value(Parent), Pid).
 
 trace_exit(SubDBIndex,_Trace= {trace_ts, Pid, exit, _Reason, TS}) when is_pid(Pid)->
+    FuncProcRegName = mk_proc_reg_name("pdb_func", SubDBIndex),
+    FuncProcRegName ! {trace_exit, {Pid, TS}},
     ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
+    insert_profile_trace_1(SubDBIndex, Pid, inactive, undefined, TS, procs), 
     update_information(ProcRegName, #information{id = pid2value(Pid), stop = TS}).
 
 trace_register(SubDBIndex,_Trace={trace_ts, Pid, register, Name, _Ts}) when is_pid(Pid)->
     ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
+    ets:insert(pdb_system, {{regname, Name}, pid2value(Pid)}),
     update_information(ProcRegName, #information{id = pid2value(Pid), name = Name}).
  
 trace_unregister(_SubDBIndex, _Trace)->
@@ -668,68 +711,82 @@ trace_link(_SubDBIndex,_Trace) ->
 trace_unlink(_SubDBIndex, _Trace) ->
     ok.
 
-trace_in(SubDBIndex, _Trace={trace_ts, Pid, in, Rq,  MFA, TS}) when is_pid(Pid)->
+trace_in(SubDBIndex, _Trace={trace_ts, Pid, in, Rq, MFA, TS}) when is_pid(Pid)->
     ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
-    erlang:put({in, Pid}, {Rq, TS}),
-    InternalPid = pid2value(Pid),
     case erlang:get({run_queue, Pid}) of 
         Rq ->
             ok;
         _ ->
             erlang:put({run_queue, Pid}, Rq),
-            update_information_rq(ProcRegName, InternalPid, {TS, Rq})
+            update_information_rq(ProcRegName, pid2value(Pid), {TS, Rq})
     end,
-    ActivityProcRegName = mk_proc_reg_name("pdb_activity", SubDBIndex),
-    case erlang:get({active, Pid}) of 
-        undefined ->
-            ok; 
-        %% process scheduling data is not recorded somehow.
-        %% add activity data (as below) or not?
-        %% erlang:put({active, Pid}, TS),
-        %% update_activity(ActivityProcRegName,
-        %%                 #activity{id = InternalPid,
-        %%                           state = active,
-        %%                           timestamp = TS,
-        %%                           runnable_procs=get_runnable_count(procs,active),
-        %%                           runnable_ports=get({runnable, ports}),
-        %%                           in_out=[{in, TS}],
-        %%                           where = MFA});
-        TS1 ->
-            update_activity(ActivityProcRegName, {in, {InternalPid, TS1},MFA, TS})
-        end;
+    process_trace_in(SubDBIndex, Pid, MFA, TS);
+trace_in(SubDBIndex, _Trace={trace_ts, Pid, in, MFA, TS}) when is_pid(Pid)->
+    process_trace_in(SubDBIndex, Pid, MFA, TS);
 trace_in(_SubDBIndex, _Trace) ->
     ok.
 
-trace_out(SubDBIndex, _Trace={trace_ts, Pid, out, Rq,  MFA, TS}) when is_pid(Pid) ->    
-    case erlang:get({in, Pid}) of 
-        {Rq, InTime} ->
-            Elapsed = elapsed(InTime, TS),
-            erlang:erase({in,Pid}),
-            InternalPid = pid2value(Pid),
-            ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
-            update_information_acc_time(ProcRegName, {InternalPid, Elapsed}),
-            case erlang:get({active, Pid}) of
-                undefined ->
-                    ok;
-                TS1 ->
-                    ActivityProcRegName = mk_proc_reg_name("pdb_activity", SubDBIndex),
-                    update_activity(ActivityProcRegName, {out, {InternalPid, TS1}, MFA, TS})
-            end;
+process_trace_in(SubDBIndex, Pid, MFA, TS) ->
+    FuncProcRegName = mk_proc_reg_name("pdb_func", SubDBIndex),
+    FuncProcRegName ! {trace_in, {Pid, MFA, TS}},
+    erlang:put({in, Pid}, TS),
+    case erlang:get({active, Pid}) of 
         undefined ->
-            ok;
-        _ ->
-            erlang:erase({in, Pid})    
-    end;
+            %% process scheduling data is not recorded somehow.
+            %% add activity data.
+            erlang:put({active, Pid}, {TS,[]}),
+            RunnableStates =erlang:get(runnable_states),
+            NewState =[{Pid, active}|RunnableStates],
+            put(runnable_states, NewState),
+            ActProcRegName = mk_proc_reg_name("pdb_activity", SubDBIndex),
+            update_activity(ActProcRegName,
+                            #activity{id = pid2value(Pid),
+                                      state = active,
+                                      timestamp = TS,
+                                      runnable_procs=get_runnable_count(procs,active),
+                                      runnable_ports=get({runnable, ports})});                                  
+        {TS1, InOuts} ->
+            erlang:put({active, Pid}, {TS1, [{in, TS}|InOuts]})
+    end.
+ 
+trace_out(SubDBIndex, _Trace={trace_ts, Pid, out, _Rq,  MFA, TS}) when is_pid(Pid) ->  
+    process_trace_out(SubDBIndex, Pid, MFA, TS);
+trace_out(SubDBIndex, _Trace={trace_ts, Pid, out, MFA, TS}) when is_pid(Pid) ->  
+    process_trace_out(SubDBIndex,Pid, MFA, TS);
+     
 trace_out(_SubDBIndex, _Trace)->
     ok.
 
+process_trace_out(SubDBIndex, Pid, MFA, TS) ->
+    FuncProcRegName = mk_proc_reg_name("pdb_func", SubDBIndex),
+    FuncProcRegName ! {trace_out, {Pid, MFA, TS}},
+    InTime = case erlang:get({in, Pid}) of  
+                 undefined -> %% sometime there is no 'in' trace.
+                     case erlang:get({active, Pid}) of 
+                         {Ts, _InOuts} -> Ts;
+                         undefined -> undefined
+                     end;
+                 Ts -> Ts
+             end,
+    erlang:erase({in,Pid}),
+    if InTime == undefined -> ok; %% this should not happen.
+       true ->
+            case erlang:get({active, Pid}) of
+                undefined ->
+                    ok;
+                {TS1, InOuts} ->
+                    erlang:put({active, Pid}, {TS1, [{out, TS}|InOuts]})
+            end
+    end.
+
 elapsed({Me1, S1, Mi1}, {Me2, S2, Mi2}) ->
-    Me = (Me2 - Me1) * 1000000,
+    Me = (Me2 - Me1) * 1000000,  
     S  = (S2 - S1 + Me) * 1000000,
     Mi2 - Mi1 + S.
 
 %%{trace_ts, _Pid, out_exited, _, _, _Ts}
-trace_out_exited(_SubDBIndex, _Trace)-> ok.
+trace_out_exited(_SubDBIndex, _Trace)-> 
+    ok.
 
 %%{trace_ts, _Pid, out_exiting, _, _, _Ts}
 trace_out_exiting(_SubDBIndex, _Trace) ->
@@ -738,6 +795,16 @@ trace_out_exiting(_SubDBIndex, _Trace) ->
 trace_in_exiting(_SubDBIndex, _Trace) ->
     ok.
 
+%% trace_receive(SubDBIndex, _Trace={trace_ts, Pid, 'receive', Msg, MsgQueueLen, Ts}) ->
+%%     if is_pid(Pid) ->
+%%             ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
+%%             ets:insert(msg_queue_len, #msg_queue_len{pid=Pid, 
+%%                                                      timestamp=Ts,
+%%                                                      len=MsgQueueLen}),
+%%             update_information_received(ProcRegName, Pid, byte_size(term_to_binary(Msg)));
+%%        true ->
+%%             ok
+%%     end;
 trace_receive(SubDBIndex, _Trace={trace_ts, Pid, 'receive', Msg, _Ts}) ->
     if is_pid(Pid) ->
             ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
@@ -750,26 +817,29 @@ trace_send(SubDBIndex,_Trace= {trace_ts, Pid, send, Msg, To, Ts}) ->
     if is_pid(Pid) ->
             ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
             MsgSize = byte_size(term_to_binary(Msg)),
-            update_information_sent(ProcRegName, Pid, MsgSize, To, Ts),
-            if is_pid(To) ->
-                    case erlang:get({run_queue, Pid}) of 
-                        undefined -> ok;
-                        FromRQ -> 
-                            case erlang:get({run_queue, To}) of 
-                                undefined -> 
-                                    ok;
-                                ToRQ -> 
-                                    update_inter_sched_msg_tab(FromRQ, ToRQ, MsgSize, Ts)
-                            end                        
-                    end;
-               true -> ok
-            end;       
+            update_information_sent(ProcRegName, Pid, MsgSize, To, Ts);
+           %% the following was for generating data about inter-scheduler 
+           %% message passing data.
+            %% if is_pid(To) ->
+            %%         case erlang:get({run_queue, Pid}) of 
+            %%             undefined -> ok;
+            %%             FromRQ -> 
+            %%                 case erlang:get({run_queue, To}) of 
+            %%                     undefined -> 
+            %%                         ok;
+            %%                     ToRQ -> 
+            %%                         update_inter_sched_msg_tab(FromRQ, ToRQ, MsgSize, Ts)
+            %%                 end                        
+            %%         end;
+            %%    true -> ok
+            %% end;       
        true ->
             ok
     end.
 
 trace_send_to_non_existing_process(SubDBIndex,
-                                   _Trace={trace_ts, Pid, send_to_non_existing_process, Msg, _To, Ts})->
+                                   _Trace={trace_ts, Pid, send_to_non_existing_process, 
+                                           Msg, _To, Ts})->
     if is_pid(Pid) ->
             ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
             update_information_sent(ProcRegName,Pid, byte_size(term_to_binary(Msg)), none, Ts);
@@ -787,17 +857,47 @@ trace_closed(SubDBIndex,_Trace={trace_ts, Port, closed, _Reason, Ts})->
     ProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
     update_information(ProcRegName, #information{id = Port, stop = Ts}).
 
+trace_call(_SubDBIndex, _Trace={trace_ts, Pid, call, {s_group, new_s_group, Args}, _, TS}) ->
+    ets:insert(s_group, #s_group{timed_node={TS, get_node_name(Pid)}, 
+                                 op={new_s_group, Args}});
+
+trace_call(_SubDBIndex, _Trace={trace_ts, Pid, call, {s_group, delete_s_group, Args}, _, TS}) ->
+    ets:insert(s_group, #s_group{timed_node={TS, get_node_name(Pid)}, 
+                                 op={delete_s_group, Args}});
+trace_call(_SubDBIndex, _Trace={trace_ts, Pid, call, {s_group, add_nodes, Args}, _, TS}) ->
+    ets:insert(s_group, #s_group{timed_node={TS, get_node_name(Pid)}, 
+                                 op={add_nodes, Args}});
+trace_call(_SubDBIndex, _Trace={trace_ts, Pid, call, {s_group, remove_nodes, Args}, _, TS}) ->
+    ets:insert(s_group, #s_group{timed_node={TS, get_node_name(Pid)}, 
+                                 op={remove_nodes, Args}});
 trace_call(SubDBIndex, _Trace={trace_ts, Pid, call, MFA,{cp, CP}, TS}) ->
     trace_call(SubDBIndex, Pid, MFA, TS, CP).
 
 trace_return_to(SubDBIndex,_Trace={trace_ts, Pid, return_to, MFA, TS}) ->
     trace_return_to(SubDBIndex, Pid, MFA, TS).
 
+trace_gc_start(SubDBIndex, {trace_ts, Pid, gc_start, _Info, TS}) ->
+    FuncProcRegName = mk_proc_reg_name("pdb_func", SubDBIndex),
+    FuncProcRegName ! {trace_gc_start, {Pid, TS}},
+    ok.
+
+trace_gc_end(SubDBIndex, {trace_ts, Pid, gc_end, _Info, TS}) ->
+    FuncProcRegName = mk_proc_reg_name("pdb_func", SubDBIndex),
+    FuncProcRegName ! {trace_gc_end, {Pid, TS}},
+    ok.
+
 trace_end_of_trace(SubDBIndex, {trace_ts, Parent, end_of_trace}) ->
     ProcRegName =mk_proc_reg_name("pdb_func", SubDBIndex),
     ProcRegName ! {self(), end_of_trace_file},
     ActRegName=mk_proc_reg_name("pdb_activity", SubDBIndex),
-    update_activity(ActRegName, end_of_trace_file),
+    Data = erase(),
+    [begin
+         InfoProcRegName = mk_proc_reg_name("pdb_info", SubDBIndex),
+         AccRunTime = calc_acc_runtime(TS, lists:reverse(InOuts), element(2, hd(InOuts))),
+         update_information_acc_time(InfoProcRegName, {pid2value(Pid),AccRunTime}),
+         update_activity(ActRegName, {update_inouts, pid2value(Pid), TS, InOuts})
+     end
+     ||{{active, Pid}, {TS,InOuts}}<-Data, InOuts/=[]],
     receive 
         {SubDBIndex, done} ->
             ?dbg(0, "Trace end of trace received done\n", []),
@@ -859,33 +959,8 @@ select_query_activity(FileNameSubDBPairs, Query) ->
 
 pdb_activity_loop(ProcRegName)->
     receive 
-        {update_activity, {_SubTab,{InOut, {Pid, TS1}, _MFA, TS}}} ->
-            case get({Pid, TS1}) of 
-                undefined ->
-                    put({Pid, TS1}, [{InOut, TS}]);
-                Val ->
-                    put({Pid, TS1}, [{InOut, TS}|Val])
-            end,
-            pdb_activity_loop(ProcRegName);
-        {update_activity, {SubTab, {erase, Pid, TS}}} ->
-            case get({Pid, TS}) of 
-                undefined -> 
-                    ok;
-                Val ->
-                    [Act] = ets:lookup(SubTab, TS),
-                    ets:update_element(SubTab, TS, 
-                                       {#activity.in_out, Act#activity.in_out++Val}),
-                    erase({Pid, TS})
-            end,                    
-            pdb_activity_loop(ProcRegName);
-        {update_activity, {SubTab, end_of_trace_file}} ->
-            Data = erase(),
-            [begin
-                 [Act] = ets:lookup(SubTab, TS),
-                 ets:update_element(SubTab, TS, 
-                                    {#activity.in_out, Act#activity.in_out++InOut})
-             end
-             ||{{_Pid, TS}, InOut}<-Data],
+        {update_activity, {SubTab, {update_inouts, _Pid, TS, InOuts}}} ->
+            ets:update_element(SubTab, TS, {#activity.in_out, InOuts}),
             pdb_activity_loop(ProcRegName);
         {update_activity, {SubTab,Activity}} ->
             ets:insert(SubTab, Activity),
@@ -929,21 +1004,25 @@ get_runnable_count(Type, State) ->
 %%% select_query_activity
 select_query_activity_1(SubDBIndex, Query) ->
     case Query of
+        {activity, {runnable, Pid}} ->
+            get_runnable(SubDBIndex, Pid);
         {activity, {runnable_counts, Options}} ->
             get_runnable_counts(SubDBIndex, Options);
         {activity, {min_max_ts, Pids}} ->
             MS= [{#activity{timestamp ='$1', id=Pid, _='_'}, [], ['$1']}
                  ||Pid<-Pids],
             Tab = mk_proc_reg_name("pdb_activity", SubDBIndex),
-            case ets:select(Tab, MS) of 
+            {First, _Cont} = ets:select(Tab, MS, 1),
+            {Last, _Cont1} = ets:select_reverse(Tab, MS, 1),
+            case First of 
                 [] -> [];
-                TSs ->
-                    [Last] = ets:lookup(Tab, lists:last(TSs)),
-                    TS1 = case Last#activity.in_out of 
-                              [] -> Last#activity.timestamp;
-                              _ ->element(2, hd(Last#activity.in_out))
-                          end,
-                    [{hd(TSs), TS1}]
+                [F] ->
+                    [Last1] = ets:lookup(Tab, hd(Last)),
+                    LastTS = case Last1#activity.in_out of 
+                              [] -> hd(Last);
+                              _ ->element(2, hd(Last1#activity.in_out))
+                           end,
+                    [{F, LastTS}]
             end;
         {activity, Options} when is_list(Options) ->
             case lists:member({ts_exact, true},Options) of
@@ -956,10 +1035,10 @@ select_query_activity_1(SubDBIndex, Query) ->
 			    Match
 		    end;		    
 		false ->
-		    MS = activity_ms(Options),
+                    MS = activity_ms(Options),
                     Tab = mk_proc_reg_name("pdb_activity", SubDBIndex),
                     case catch ets:select(Tab, MS) of
-		    {'EXIT', Reason} ->
+                        {'EXIT', Reason} ->
 	                    io:format(" - select_query_activity [ catch! ]: ~p~n", [Reason]),
 			    [];
 		    	Match ->
@@ -972,6 +1051,20 @@ select_query_activity_1(SubDBIndex, Query) ->
     	    []
     end.
 
+get_runnable(SubDBIndex, _Pid={pid, {P1, P2, P3}}) ->
+    MS = [{#activity{timestamp = '$1',id = '$2',state = '$3',in_out = '$4', _='_'},
+           [{'==',  '$2',{{pid, {{P1, P2, P3}}}}}],
+           [{{'$1', '$3', '$4'}}]}],
+    Tab = mk_proc_reg_name("pdb_activity", SubDBIndex),
+    case catch ets:select(Tab, MS) of
+        {'EXIT', Reason} ->
+            io:format(" - select_query_activity [ catch! ]: ~p~n", [Reason]),
+            [];
+        Match ->
+            Match
+    end.
+       
+    
 %% This only works when all the procs/ports are selected.
 get_runnable_counts(SubDBIndex, Options) ->
     MS = activity_count_ms(Options),
@@ -1041,39 +1134,62 @@ lists_filter([D|Ds], Options) ->
 % For example: [{ts_min, TS1}, {ts_max, TS2}, {id, PID1}, {id, PORT1}] would be
 % ({ts_min, TS1} and {ts_max, TS2} and {id, PID1}) or
 % ({ts_min, TS1} and {ts_max, TS2} and {id, PORT1}).
-
 activity_ms(Opts) ->
-    Head = #activity{
-    	timestamp = '$1',
-	id = '$2',
-	state = '$3',
-	where = '$4',
-	_ = '_'},
-
+    Head=#activity{timestamp = '$1',
+                   id = '$2',
+                   state = '$3',
+                   where= '$4', 
+                   runnable_procs='$5', 
+                   runnable_ports='$6',
+                   _='_'},
+    Body = [{{activity, '$1', '$2', '$3', '$4', '$5', '$6',[]}}],
     {Conditions, IDs} = activity_ms_and(Head, Opts, [], []),
-    Body = ['$_'],
-    
-    lists:foldl(
-    	fun (Option, MS) ->
-	    case Option of
-		{id, ports} ->
-	    	    [{Head, [{is_port, Head#activity.id} | Conditions], Body} | MS];
-		{id, procs} ->
-	    	    [{Head,[{'==', pid, {element, 1, Head#activity.id}} | Conditions], Body} | MS];
-		{id, ID} when is_port(ID) ->
-	    	    [{Head,[{'==', Head#activity.id, ID} | Conditions], Body} | MS];
-                {id, {pid, {P1, P2, P3}}}->
-	    	    [{Head,[{'==', Head#activity.id, {{pid, {{P1, P2, P3}}}}}| Conditions], Body} | MS];
-		{id, all} ->
-	    	    [{Head, Conditions,Body} | MS];
-		_ ->
-	    	    io:format("activity_ms id dropped ~p~n", [Option]),
-	    	    MS
-	    end
-	end, [], IDs).
+    Cond =  lists:foldl(
+              fun (Option, Conds) ->
+                      case Option of
+                          {id, ports} ->
+                              [{is_port, Head#activity.id}|Conds];
+                          {id, procs} ->
+                              [{'==', pid, {element, 1, Head#activity.id}} | Conds];
+                          {id, ID} when is_port(ID) ->
+                              [{'==', Head#activity.id, ID} | Conds];
+                          {id, {pid, {P1, P2, P3}}}->
+                              [{'==', Head#activity.id, {{pid, {{P1, P2, P3}}}}}| Conds];
+                          {id, all} ->
+                              Conds;
+                          {pids, Pids}->
+                              case length(Pids)/ets:info(pdb_info, size) <0.6 of 
+                                  true ->
+                                      [mk_pids_cond(Pids)|Conds];
+                                  false ->
+                                      AllPids = ets:select(
+                                                  pdb_info,[{#information{id='$1', _='_'}, 
+                                                             [{'not', {is_port, '$1'}}], ['$1']}]),
+                                      OtherPids = AllPids -- Pids,
+                                      case OtherPids of 
+                                          [] -> 
+                                              [{'==', pid, {element, 1, Head#activity.id}} | Conds];
+                                          _ ->
+                                              [{'==', pid, {element, 1, Head#activity.id}}, 
+                                               {'not', mk_pids_cond(OtherPids)}|Conds]
+                                      end
+                              end;
+                          _ ->
+                              io:format("activity_ms id dropped ~p~n", [Option]),
+                              Conds
+                      end
+              end, lists:reverse(Conditions), IDs),
+    [{Head, lists:reverse(Cond), Body}].
+
+mk_pids_cond(Pids) ->
+    lists:foldl(fun({pid, {P1, P2, P3}},C) ->
+                        if C == [] ->
+                                {'==', '$2', {{pid, {{P1, P2, P3}}}}};
+                           true -> {'orelse', {'==', '$2', {{pid, {{P1, P2, P3}}}}}, C}
+                        end
+                end, [], Pids).
 
 activity_count_ms(Opts) ->
-    % {activity, Timestamp, State, Mfa}
     Head = #activity{
       timestamp = '$1',
       id = '$2',
@@ -1087,9 +1203,9 @@ activity_count_ms(Opts) ->
       fun (Option, MS) ->
               case Option of
                   {id, ports} ->
-                      [{Head, [{is_port, Head#activity.id} | Conditions], Body} | MS];
+                      [{Head, [{is_port, Head#activity.id}| Conditions], Body} | MS];
                   {id, procs} ->
-                      [{Head,[{'==', pid, {element, 1, '$2'}} | Conditions], Body} | MS];
+                      [{Head,[{'==', pid, {element, 1, '$2'}}| Conditions], Body} | MS];
                   {id, all} ->
                       [{Head, Conditions,Body} | MS];
                   _ ->
@@ -1098,8 +1214,8 @@ activity_count_ms(Opts) ->
               end
       end, [], IDs).
 
-activity_ms_and(_, [], Constraints, []) ->
-    {Constraints, [{id, all}]};
+%% activity_ms_and(_, [], Constraints, []) ->
+%%     {Constraints, [{id, all}]};
 activity_ms_and(_, [], Constraints, IDs) -> 
     {Constraints, IDs};
 activity_ms_and(Head, [Opt|Opts], Constraints, IDs) ->
@@ -1113,6 +1229,9 @@ activity_ms_and(Head, [Opt|Opts], Constraints, IDs) ->
 	{id, ID} ->
 	    activity_ms_and(Head, Opts, 
 		Constraints, [{id, ID} | IDs]);
+        {pids, Pids} ->
+	    activity_ms_and(Head, Opts, 
+		Constraints, [{pids, Pids} | IDs]);
 	{state, State} ->
 	    activity_ms_and(Head, Opts, 
 		[{'==', Head#activity.state, State} | Constraints], IDs);
@@ -1323,37 +1442,34 @@ update_information_rq_1(Pid, {TS,RQ}) ->
 %% send to the same run queue needs a different algorithm,
 %% and this feature is removed for now.
 update_information_sent_1(From, MsgSize, To, Ts) ->
-    update_inter_node_msg_tab(From, MsgSize, To, Ts),
-    InternalPid =pid2value(From),
-    case  ets:lookup(pdb_info, InternalPid) of
+    InternalFrom =pid2value(From),
+    update_inter_proc_msg_tab(From, MsgSize, To, Ts),
+    case ets:lookup(pdb_info, InternalFrom) of
         [] -> 
             ets:insert(pdb_info, 
-                       #information{id=InternalPid, 
+                       #information{id=InternalFrom, 
                                     msgs_sent={1, MsgSize}
                                    });            
         [I] ->
             {No, Size} =  I#information.msgs_sent,
-            ets:update_element(pdb_info, InternalPid, 
+            ets:update_element(pdb_info, InternalFrom, 
                                {#information.msgs_sent, {No+1, Size+MsgSize}})
     end.
 
-update_inter_node_msg_tab(From, MsgSize, To, Ts) ->
-    case same_node_pids(From, To) of
-        true ->
-            ok;
-        false ->
-            ets:insert(inter_node, 
-                       #inter_node{
-                         timed_from_node = {Ts, get_node_name(From)},
-                         to_node=get_node_name(To),
-                         msg_size = MsgSize})
-    end.
 
-update_inter_sched_msg_tab(FromSched, ToSched, MsgSize, Ts) ->
-    ets:insert(inter_sched,
-               #inter_sched{from_sched_with_ts={Ts, FromSched},
-                            dest_sched=ToSched,
-                            msg_size = MsgSize}).
+update_inter_proc_msg_tab(_From, _MsgSize, To, _Ts) when is_port(To) ->
+    ok;
+update_inter_proc_msg_tab(From, MsgSize, To, Ts) ->
+    InternalFrom=pid2value(From),
+    InternalTo = if is_pid(To) ->
+                         pid2value(To);
+                    true ->To
+                 end,
+    ets:insert(inter_proc, 
+               #inter_proc{
+                 timed_from = {Ts, get_node_name(From), InternalFrom},
+                 to={get_node_name(To), InternalTo},
+                 msg_size = MsgSize}).
 
   
 update_information_received_1(Pid, MsgSize) ->
@@ -1428,7 +1544,12 @@ select_query_information(Query) ->
 		[{is_atom, {element, 2, '$1'}}],
 		['$_']
 		}]);
-	Unhandled ->
+        {information, num_of_nodes} ->
+            NodeIds=ets:select(pdb_info, 
+                               [{#information{id={pid, {'$1', '_','_'}}, _='_'},
+                                 [], ['$1']}]),
+            length(sets:to_list(sets:from_list(NodeIds)));
+    	Unhandled ->
 	    io:format("select_query_information, unhandled: ~p~n", [Unhandled]),
 	    []
     end.
@@ -1544,40 +1665,34 @@ trace_return_to(SubDBIndex,Pid, MFA, TS) ->
 %% one pdb_func_loop for each trace file.
 pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done}) ->
     receive
-        CallTrace={trace_call, {Pid, _, _, _}} ->
-            case lists:keyfind(Pid, 1, ChildrenProcs) of 
+        Trace={trace_call, _} ->
+            NewChildrenProcs=pdb_func_loop_process_trace(
+                               SubDBIndex, ChildrenProcs, PrevStacks, Trace),
+            pdb_func_loop({SubDB, SubDBIndex, NewChildrenProcs, PrevStacks, Done});
+        Trace={trace_return_to, _} ->
+            NewChildrenProcs=pdb_func_loop_process_trace(
+                               SubDBIndex, ChildrenProcs, PrevStacks, Trace),
+            pdb_func_loop({SubDB, SubDBIndex, NewChildrenProcs, PrevStacks, Done});
+        Trace={trace_out, _} ->
+            pdb_func_loop_process_trace_1(ChildrenProcs,Trace),
+            pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done});
+        Trace={trace_in, _} ->
+            pdb_func_loop_process_trace_1(ChildrenProcs,Trace),
+            pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done});
+        Trace={trace_exit, {Pid, _TS}} ->
+            case lists:keyfind(Pid, 1, ChildrenProcs) of
                 {Pid, Proc} ->
-                    Proc ! CallTrace,
-                    pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done});
+                    Proc ! {self(),Trace};
                 false ->
-                    PrevStack = case lists:keyfind(Pid,1,PrevStacks) of 
-                                    false -> false;
-                                    {Pid, Stack} -> Stack
-                                end,
-                    Proc = spawn_link(
-                             fun()-> 
-                                     pdb_sub_func_loop({SubDBIndex, Pid, [], PrevStack, 0})
-                             end),
-                    Proc! CallTrace,
-                    pdb_func_loop({SubDB, SubDBIndex,[{Pid, Proc}|ChildrenProcs], PrevStacks, Done})                        
-            end;
-        ReturnTrace={trace_return_to, {Pid, _, _}} ->
-            case lists:keyfind(Pid, 1, ChildrenProcs) of 
-                {Pid, Proc} ->
-                    Proc! ReturnTrace,
-                    pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs,PrevStacks, Done});
-                false ->
-                    PrevStack = case lists:keyfind(Pid,1,PrevStacks) of 
-                                    false -> false;
-                                    {Pid, Stack} -> Stack
-                                end,
-                    Proc = spawn_link(
-                             fun()-> 
-                                     pdb_sub_func_loop({SubDBIndex, Pid, [], PrevStack, 0})
-                             end),
-                    Proc! ReturnTrace,
-                    pdb_func_loop({SubDB, SubDBIndex,[{Pid, Proc}|ChildrenProcs],PrevStacks, Done})
-            end;
+                    ok
+            end,
+            pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done});
+        Trace={trace_gc_start, _Info} ->
+            pdb_func_loop_process_trace_1(ChildrenProcs,Trace),
+            pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done});
+        Trace={trace_gc_end, _Info} ->
+            pdb_func_loop_process_trace_1(ChildrenProcs,Trace),
+            pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done});
         %% the current trace file gets to the end.
         {_Parent, end_of_trace_file} ->
             Self = self(),
@@ -1632,38 +1747,74 @@ pdb_func_loop({SubDB, SubDBIndex, ChildrenProcs, PrevStacks, Done}) ->
             pdb_func_loop({SubDB,SubDBIndex,ChildrenProcs, PrevStacks, Done})                
     end.
 
-pdb_sub_func_loop({SubDBIndex,Pid, Stack, PrevStack, WaitTimes}) ->
+pdb_func_loop_process_trace(SubDBIndex, ChildrenProcs, PrevStacks, Trace) ->
+    {_TraceTag, TraceData} = Trace,
+    Pid = element(1, TraceData),
+    case lists:keyfind(Pid, 1, ChildrenProcs) of
+        {Pid, Proc} ->
+            Proc ! Trace,
+            ChildrenProcs;
+        false ->
+            PrevStack = case lists:keyfind(Pid,1,PrevStacks) of
+                            false -> false;
+                            {Pid, Stack} -> Stack
+                        end,
+            Proc = spawn_link(
+                     fun() ->
+                             pdb_sub_func_loop({SubDBIndex, Pid, [], PrevStack})
+                     end),
+            Proc ! Trace,
+            [{Pid, Proc}|ChildrenProcs]
+    end.
+
+pdb_func_loop_process_trace_1(ChildrenProcs, Trace) ->
+    {_TraceTag, TraceData} = Trace,
+    Pid = element(1, TraceData),
+    case lists:keyfind(Pid, 1, ChildrenProcs) of
+        {Pid, Proc} ->
+            Proc ! Trace;
+        false ->
+            ok
+    end.
+
+pdb_sub_func_loop({SubDBIndex,Pid, Stack, PrevStack}) ->
     receive
         {trace_call, {Pid, Func, TS, CP}} ->
             NewStack=trace_call_1(Pid, Func, TS, CP, Stack),
-            pdb_sub_func_loop({SubDBIndex, Pid, NewStack, PrevStack, WaitTimes});
+            pdb_sub_func_loop({SubDBIndex, Pid, NewStack, PrevStack});
         {trace_return_to, {Pid, Func, TS}} ->
             PrevSubIndex = SubDBIndex-1,
-            case trace_return_to_1(Pid, Func, TS, Stack) of
-                wait_for_prev_stack ->
-                    case SubDBIndex of 
-                        1 ->
-                            Stack1=[[{Func, TS}]],
-                            pdb_sub_func_loop({SubDBIndex, Pid, Stack1, PrevStack, WaitTimes+1});
-                        _ ->
-                            case PrevStack of 
-                                false ->
-                                    receive 
-                                        {end_of_trace_file, {PrevSubIndex, Pid, PrevStack1}} ->
-                                            NewStack1=trace_return_to_1(Pid, Func, TS, PrevStack1),
-                                            pdb_sub_func_loop({SubDBIndex, Pid, NewStack1, false, WaitTimes+1})
-                                     after 50000 ->
-                                            io:format("pdb_sub_func_loop, time out ~p~n", [{PrevSubIndex, Pid, WaitTimes}]),
-                                            pdb_sub_func_loop({SubDBIndex, Pid, [[{Func, TS}]], false, WaitTimes+1})
-                                    end;
-                                _ ->
-                                    NewStack1=trace_return_to_1(Pid, Func, TS, PrevStack),
-                                    pdb_sub_func_loop({SubDBIndex, Pid, NewStack1, false, WaitTimes+1})
-                            end
-                    end;
-                NewStack ->
-                    pdb_sub_func_loop({SubDBIndex, Pid, NewStack, PrevStack, WaitTimes})
+            {NewStack, NewPrevStack}=trace_return_to_0(SubDBIndex, Pid, Stack,
+                                                       PrevStack, Func, TS,
+                                                       PrevSubIndex),
+            pdb_sub_func_loop({SubDBIndex, Pid, NewStack, NewPrevStack});
+        {trace_in, {Pid, Func, TS}} ->
+            NewStack = trace_in_1(Pid, Func, TS, Stack),
+            pdb_sub_func_loop({SubDBIndex, Pid, NewStack, PrevStack});
+        {trace_out, {Pid, Func, TS}} ->
+            Stack1 = case Stack of 
+                         [] -> case Func of undefined -> [];
+                                   _ -> [[{Func, TS}]]
+                               end;
+                         _ -> Stack
+                     end,
+            NewStack = [[{suspend, TS}] | Stack1],
+            pdb_sub_func_loop({SubDBIndex, Pid, NewStack, PrevStack});
+        {Parent, {trace_exit, {Pid,TS}}} ->
+            case lists:reverse(lists:flatten(Stack)) of 
+                [] -> 
+                    Parent ! {Pid, done};
+                [{Func0, _}|_] -> 
+                    Stack1=trace_return_to_2(Pid, Func0, TS, Stack),
+                    trace_return_to_2(Pid, undefined, TS, Stack1),
+                    Parent ! {Pid, done}
             end;
+        {trace_gc_start, {Pid,TS}} ->
+            NewStack = [[{garbage_collect, TS}]|Stack],
+            pdb_sub_func_loop({SubDBIndex, Pid, NewStack, PrevStack});
+        {trace_gc_end, {Pid,TS}} ->
+            NewStack=trace_gc_end_1(Pid, TS, Stack),
+            pdb_sub_func_loop({SubDBIndex, Pid, NewStack, PrevStack});
         {Parent, end_of_trace_file} ->
             NextFuncRegName = mk_proc_reg_name("pdb_func",SubDBIndex+1),
             case whereis(NextFuncRegName) of 
@@ -1675,8 +1826,38 @@ pdb_sub_func_loop({SubDBIndex,Pid, Stack, PrevStack, WaitTimes}) ->
             end
     end.
 
-mk_proc_reg_name(RegNamePrefix,Index) ->
-    list_to_atom(RegNamePrefix ++ integer_to_list(Index)).
+trace_in_1(Pid, Func, TS, Stack) ->
+    ?dbg(-1, "trace_in(~p, ~p, ~p)~n~p~n", [Pid, Func, TS, Stack]),
+    case Stack of 
+        [] ->
+            [[{Func,TS}]]; 
+        [[{suspend, _}]] ->
+            trace_return_to_2(Pid, undefined, TS, Stack);
+        [[{suspend,_}] | [[{suspend,_}] | _]=NewStack] ->
+	    %% No stats update for a suspend on suspend
+	    NewStack;
+        [[{suspend, TS0}] | [[{Func1, TS1} | _] | _]] ->
+            update_fun_related_info(Pid, suspend, TS0, TS, Func1, TS1),
+            trace_return_to_2(Pid, Func1, TS, Stack);
+        _ ->
+            throw({inconsistent_trace_data, ?MODULE, ?LINE,
+                   [Pid, Func, TS, Stack]})
+    end.
+
+trace_gc_end_1(Pid, TS, Stack) ->
+    ?dbg(0, "trace_gc_end(~p, ~p)~n~p~n", [Pid, TS, Stack]),
+    case Stack of
+	[] ->
+	    ok;
+	[[{garbage_collect, _}]] ->
+            trace_return_to_2(Pid, undefined, TS, Stack);
+	[[{garbage_collect, TS0}], [{Func1, TS1} | _] | _] ->
+            update_fun_related_info(Pid, garbage_collect, TS0, TS, Func1, TS1),
+            trace_return_to_2(Pid, Func1, TS, Stack);
+	_ ->
+	    throw({inconsistent_trace_data, ?MODULE, ?LINE,
+                   [Pid, TS, Stack]})
+    end.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1714,7 +1895,7 @@ trace_call_2(Pid, Func, TS, CP, Stack) ->
 		end,
             [[{Func, TS}] | OldStack];
         [[{suspend, _} | _] | _] ->
-      	    throw({inconsistent_trace_data, ?MODULE, ?LINE,
+            throw({inconsistent_trace_data, ?MODULE, ?LINE,
                    [Pid, Func, TS, CP, Stack]});
 	[[{garbage_collect, _} | _] | _] ->
 	    throw({inconsistent_trace_data, ?MODULE, ?LINE,
@@ -1741,7 +1922,7 @@ trace_call_2(Pid, Func, TS, CP, Stack) ->
                               trace_return_to_2(Pid, Func0, TS,
                                                 Stack));
         [_|_] ->
-           [[{Func, TS}], [{CP, TS}, dummy]|Stack]
+            [[{Func, TS}], [{CP, TS}, dummy]|Stack]
     end.
     
 %% Tail recursive stack push
@@ -1752,13 +1933,11 @@ trace_call_shove(Pid, Func, TS,  [Level0|Stack1]) ->
     Level01 = [{Func, TS} | Level0],
     [NewLevel0| NewStack1] = 
         [trace_call_collapse(Level01) | Stack1],
-    ?dbg((-1), "After collaps:\n~p\n", [[NewLevel0| NewStack1]]),
+    ?dbg(-1, "After collapse:\n~p\n", [[NewLevel0| NewStack1]]),
     case Level01 -- NewLevel0 of 
         [] -> ok;
         Funs ->
-            %% io:format("Funs:\n~p\n", [Funs]),
             Funs1= lists:sublist(NewLevel0, length(Funs)+1),
-            %% io:format("Funs1:\n~p\n", [Funs1]),
             trace_call_shove_update_call_info(Pid,Funs1)
     end,
     [NewLevel0| NewStack1].
@@ -1774,8 +1953,6 @@ trace_call_shove_update_call_info(Pid, [{Func1, TS1}, {Func2, Ts2}|Tail])->
 
 %% Collapse tail recursive call stack cycles to prevent them from
 %% growing to infinite length.
-trace_call_collapse([]) ->
-     [];
 trace_call_collapse([_] = Stack) ->
     Stack;
 trace_call_collapse([_, _] = Stack) ->
@@ -1788,13 +1965,12 @@ trace_call_collapse([_ | Stack1] = Stack) ->
 %% and try if that instance may be used as stack top instead.
 trace_call_collapse_1(Stack, [], _) ->
     Stack;
-trace_call_collapse_1([{Func0, _} | _] = Stack, [{Func0, _} | S1] = S, N) ->
-   %% io:format("Collapse_1:\n~p\n", [{Stack, S, N}]),
+trace_call_collapse_1([{Func0, _} |_] = Stack, [{Func0, _TS} | S1] = S, N) ->
     case trace_call_collapse_2(Stack, S, N) of
 	true ->
-	    S;
+            S;
 	false ->
-	    trace_call_collapse_1(Stack, S1, N+1)
+            trace_call_collapse_1(Stack, S1, N+1)
     end;
 trace_call_collapse_1(Stack, [_ | S1], N) ->
     trace_call_collapse_1(Stack, S1, N+1).
@@ -1823,9 +1999,41 @@ trace_call_collapse_2(_Stack, [], _N) ->
 %%             trace function return                %%
 %%                                                  %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+trace_return_to_0(SubDBIndex, Pid, Stack, PrevStack, Func, TS,
+                  PrevSubIndex) ->
+    case trace_return_to_1(Pid, Func, TS, Stack) of
+     wait_for_prev_stack ->
+            case SubDBIndex of
+                1 ->
+                    Stack1=[[{Func, TS}]],
+                    {Stack1, PrevStack};
+                _ ->
+                    case PrevStack of
+                        false ->
+                            receive
+                                {end_of_trace_file, {PrevSubIndex, Pid, PrevStack1}} ->
+                                    NewStack1=trace_return_to_1(Pid, Func, TS, PrevStack1),
+                                    {NewStack1, PrevStack1}
+                            after 1000  %% what is the proper timeout value here?
+                                      ->
+                                    io:format("pdb_sub_func_loop, time out ~p~n", [{PrevSubIndex, Pid}]),
+                                    {[[{Func, TS}]], false}
+                            end;
+                        _ ->
+                            NewStack1=trace_return_to_1(Pid, Func, TS, PrevStack),
+                            {NewStack1, PrevStack}
+                    end
+            end;
+        NewStack1 ->
+            {NewStack1, PrevStack}
+    end.
+
 trace_return_to_1(Pid, Func, TS, Stack) ->
-    Caller = mfarity(Func),
-    ?dbg((-1), "trace_return_to(~p, ~p, ~p)~n~p~n",
+    Caller = if is_tuple(Func) -> mfarity(Func);
+                true -> Func
+             end,
+    ?dbg(-1, "trace_return_to(~p, ~p, ~p)~n~p~n",
 	 [Pid, Caller, TS, Stack]),
     case Stack of
 	[[{suspend, _} | _] | _] ->
@@ -1836,7 +2044,7 @@ trace_return_to_1(Pid, Func, TS, Stack) ->
                    [Pid, Caller, TS, Stack]});
         [_, [{Caller, _}|_]|_] ->
             trace_return_to_2(Pid, Caller, TS, Stack);
-        [[{Func1, TS1}, dummy]|Stack1=[_, [{Caller, _}|_]]] when Caller=/=Func1->
+        [[{Func1, TS1}, dummy]|Stack1=[_, [{Caller, _}|_]|_]] when Caller=/=Func1->
             {Caller1, Caller1StartTs}= 
                 case Stack1 of 
                     [[{Func2, TS2}|_]|_]->
@@ -1892,11 +2100,24 @@ trace_return_to_2(Pid, Func, TS, [[{Func0, Func0StartTS} | Level1] | Stack1]) ->
                                                 [] ->
                                                     {Func, Func0StartTS}
                                             end,
-                    update_fun_related_info(Pid, Func0, Func0StartTS, TS, Caller, CallerStartTs)
+                    case lists:any(fun({Func2, _}) -> Func2 ==Func0;
+                                       (_) -> false 
+                                  end, lists:append(Stack1)) of 
+                        false ->
+                            update_fun_related_info(Pid, Func0, Func0StartTS, TS, Caller, CallerStartTs);
+                        true ->
+                            update_calltree_info(Pid, {Func0, Func0StartTS, TS}, {Caller, CallerStartTs})
+                    end
             end;
-        _ -> ok  %% garbage collect or suspend.
+        _ -> 
+            ok        
     end,
     if Level1 ==[dummy] ->
+            case Stack1 of
+                [[{Func3, TS3} | _] | _]->
+                    update_fun_related_info(Pid, Func0, Func0StartTS, TS, Func3, TS3);
+                _ -> ok
+            end,
             trace_return_to_2(Pid, Func, TS, Stack1);
        true ->
             trace_return_to_2(Pid, Func, TS, [Level1|Stack1])
@@ -1904,12 +2125,12 @@ trace_return_to_2(Pid, Func, TS, [[{Func0, Func0StartTS} | Level1] | Stack1]) ->
 
 update_fun_related_info(Pid, Func0, StartTS, EndTS, Caller, CallerStartTs) ->
     ?dbg(-1, "update fun related info:\n~p\n", [{Pid, Func0, StartTS, EndTS, Caller, CallerStartTs}]),
-    ets:insert(funcall_info, #funcall_info{id={pid2value(Pid), StartTS}, func=Func0, end_ts=EndTS}),
+    ets:insert(funcall_info, #funcall_info{id={pid2value(Pid), StartTS, EndTS}, func=Func0}),
     update_fun_call_time({Pid, Func0}, {StartTS, EndTS}),
     update_calltree_info(Pid, {Func0, StartTS, EndTS}, {Caller, CallerStartTs}).
    
         
--spec(update_calltree_info(pid(), {true_mfa(), timestamp(), timestamp()}, 
+-spec(update_calltree_info(pid(), {true_mfa()|suspend|garbage_collect, timestamp(), timestamp()|undefined}, 
                            {true_mfa(), timestamp()}) ->true).       
 update_calltree_info(Pid, {Callee, _StartTS0, _}, {Caller,  CallerStartTS0}) when Caller==Callee ->
     CallerStartTS = case is_list_comp(Caller) of 
@@ -1925,8 +2146,8 @@ update_calltree_info(Pid, {Callee, _StartTS0, _}, {Caller,  CallerStartTS0}) whe
         [] ->
             CallerInfo = #fun_calltree{id = CallerId,
                                        rec_cnt=1,
-                                       start_ts=CallerStartTS,
-                                               called = []}, 
+                                       start_ts=CallerStartTS0,
+                                       called = []}, 
             ets:insert(fun_calltree, CallerInfo) 
     end;
   
@@ -1942,13 +2163,15 @@ update_calltree_info(Pid, {Callee, StartTS0, EndTS}, {Caller, CallerStartTS0}) -
     Pid1 = pid2value(Pid),
     case ets:lookup(fun_calltree, {Pid1, Callee, StartTS}) of
         [] ->
-            add_new_callee_caller(Pid1, {Callee, StartTS, EndTS},
+            add_new_callee_caller(Pid1, {Callee, StartTS, EndTS}, 
+                                  now_diff(EndTS,StartTS0),
                                   {Caller, CallerStartTS});
         [F] -> 
             NewF =F#fun_calltree{id=setelement(3, F#fun_calltree.id, Caller),
                                  cnt=1,
-                                 start_ts =StartTS,
-                                 end_ts=EndTS},           
+                                 acc_time = now_diff(EndTS,StartTS0),
+                                 start_ts =StartTS0,
+                                 end_ts=EndTS},   
             CallerId = {Pid1, Caller, CallerStartTS},
             case ets:lookup(fun_calltree, CallerId) of 
                 [C] when Caller=/=Callee->
@@ -1957,10 +2180,7 @@ update_calltree_info(Pid, {Callee, StartTS0, EndTS}, {Caller, CallerStartTS0}) -
                     NewC1 = collapse_call_tree(NewC, Callee),
                     ets:insert(fun_calltree, NewC1);    
                 _ ->
-                    CallerInfo = #fun_calltree{id = CallerId,
-                                               cnt =0,
-                                               start_ts=CallerStartTS,
-                                               called = [NewF]}, 
+                    CallerInfo = create_caller_info(CallerId, EndTS, StartTS0, NewF),
                     ets:delete_object(fun_calltree, F),
                     NewCallerInfo = collapse_call_tree(CallerInfo, Callee),
                     case ets:lookup(fun_calltree, CallerId) of
@@ -1972,23 +2192,42 @@ update_calltree_info(Pid, {Callee, StartTS0, EndTS}, {Caller, CallerStartTS0}) -
                     end                            
             end
     end.
-   
-add_new_callee_caller(Pid, {Callee, StartTS, EndTS},{Caller, CallerStartTS}) ->
+
+add_new_callee_caller(Pid, {Callee, StartTS, EndTS},CalleeTime, 
+                      {Caller, CallerStartTS}) ->
     CalleeInfo = #fun_calltree{id={Pid, Callee, Caller},
                                cnt =1, 
                                called = [],
+                               acc_time = CalleeTime,
                                start_ts = StartTS,
                                end_ts = EndTS},
+    CallerId = {Pid, Caller, CallerStartTS},
     case ets:lookup(fun_calltree, {Pid, Caller, CallerStartTS}) of
-         [] ->
-            CallerInfo = #fun_calltree{id = {Pid, Caller, CallerStartTS},
-                                       cnt =0,
-                                       called = [CalleeInfo],
-                                       start_ts=CallerStartTS},
+        [] ->
+            CallerInfo = create_caller_info(CallerId, EndTS, CallerStartTS,CalleeInfo),
             ets:insert(fun_calltree, CallerInfo);
         [C] ->
-            NewC = C#fun_calltree{called=add_new_callee(CalleeInfo, C#fun_calltree.called)},
+            NewC = C#fun_calltree{
+                     called=add_new_callee(CalleeInfo, 
+                                           C#fun_calltree.called)},
             ets:insert(fun_calltree, NewC)
+    end.
+
+create_caller_info(CallerId = {Pid, Caller, CallerStartTS}, 
+                   EndTS, CallerStartTS0, CalleeInfo) ->
+    if Caller == undefined orelse Caller == {percept2_profile, start, 3} ->
+            update_fun_call_time({Pid, Caller}, {CallerStartTS0, EndTS}),
+            #fun_calltree{id = CallerId,
+                          cnt =0,
+                          start_ts=CallerStartTS,
+                          end_ts = EndTS,
+                          acc_time =  now_diff(EndTS,CallerStartTS0),
+                          called = [CalleeInfo]};
+       true ->
+            #fun_calltree{id = CallerId,
+                          cnt =0,
+                          start_ts=CallerStartTS,
+                          called = [CalleeInfo]}
     end.
 
 
@@ -2044,18 +2283,37 @@ add_new_callee(CalleeInfo, CalleeList) ->
     end.
 
 combine_fun_info(FunInfo1=#fun_calltree{id=Id, called=Callees1, 
-                                        start_ts=StartTS1,end_ts= _EndTS1,
-                                        cnt=CNT1}, 
+                                        start_ts=StartTS1,end_ts= EndTS1,
+                                        acc_time = AccTime1,
+                                        cnt=CNT1,
+                                        rec_cnt = RecCnt1}, 
                  _FunInfo2=#fun_calltree{id=Id, called=Callees2, 
-                                         start_ts=_StartTS2, end_ts=EndTS2,
-                                         cnt=CNT2}) ->
+                                         start_ts=StartTS2, end_ts=EndTS2,
+                                         acc_time = AccTime2,
+                                         cnt=CNT2,
+                                         rec_cnt = RecCnt2}) ->
+    NewAccTime = case StartTS1=<StartTS2 andalso EndTS1>=EndTS2 of 
+                     true ->
+                         AccTime1;
+                     false ->
+                         case StartTS1>=StartTS2 andalso EndTS1=<EndTS2 of 
+                             true ->
+                                 AccTime2;
+                             false ->
+                                 AccTime1+AccTime2
+                         end
+                 end,
     NewCallees=lists:foldl(fun(C, Callees) ->
-                                  add_new_callee(C, Callees)
+                                   add_new_callee(C, Callees)
                            end, Callees1, Callees2),
     FunInfo1#fun_calltree{id=Id, called=NewCallees, 
-                      start_ts=StartTS1, end_ts=EndTS2,
-                      cnt = CNT1 + CNT2}.
-                      
+                          start_ts=lists:min([StartTS1,StartTS2]),
+                          end_ts=lists:max([EndTS1, EndTS2]),
+                          acc_time = NewAccTime, 
+                          cnt = CNT1 + CNT2, 
+                          rec_cnt = RecCnt1+RecCnt2}.
+
+
 is_list_comp({_M, F, _A}) ->
     re:run(atom_to_list(F), ".*-lc.*", []) /=nomatch;
 is_list_comp(_) ->
@@ -2093,7 +2351,8 @@ consolidate_db(FileNameSubDBPairs) ->
         _ -> ok
     end,
     %% check no of nodes (temporary solution).
-    NumOfNodes=get_num_of_nodes(),
+    NumOfNodes=percept_db_select_query(
+                 [],{information, num_of_nodes}),
     update_system_nodes_num(SystemProc, NumOfNodes),
 
     ?dbg(0, "consolidate runnability ...\n",[]),
@@ -2113,7 +2372,7 @@ get_start_time_ts() ->
               T1 when is_tuple(T1)-> T1;
                _ -> undefined
           end,
-    IMin =case ets:first(inter_node) of 
+    IMin =case ets:first(inter_proc) of 
               {T2, _} when is_tuple(T2)-> T2;
               _ -> undefined
           end,
@@ -2135,7 +2394,7 @@ get_stop_time_ts(LastIndex) ->
                T1 when is_tuple(T1)-> T1;
                _ -> undefined
            end,
-    IMax =case ets:last(inter_node) of 
+    IMax =case ets:last(inter_proc) of 
               {T2, _} when is_tuple(T2)-> T2;
               _ -> undefined
           end,
@@ -2144,12 +2403,7 @@ get_stop_time_ts(LastIndex) ->
         [] -> undefined;
         _ -> lists:max(Ts)
     end.
-get_num_of_nodes() ->  
-    NodeIds=ets:select(pdb_info, 
-                       [{#information{id={pid, {'$1', '_','_'}}, _='_'},
-                         [], ['$1']}]),
-    length(sets:to_list(sets:from_list(NodeIds))).
-    
+
 %%%------------------------------------------------------%%%
 %%%                                                      %%%
 %%%  consolidate runnability                             %%%
@@ -2229,7 +2483,7 @@ consolidate_calltree_2(Pid) ->
                                [],
                                ['$_']
                               }]),
-    Key = Tree#fun_calltree.id,
+    Key = Tree#fun_calltree.id,  %%TODO: how to decide which is the caller?
     ets:update_element(fun_calltree, Key, {#fun_calltree.called, Others++Tree#fun_calltree.called}),
     lists:foreach(fun(T)-> 
                           ets:delete_object(fun_calltree, T) 
@@ -2257,6 +2511,15 @@ process_a_call_tree(Id) ->
 
 process_a_call_tree_1(CallTree) ->
     {Pid, MFA, Caller}=CallTree#fun_calltree.id,
+    RecCnt = CallTree#fun_calltree.rec_cnt,
+    if RecCnt /=0 ->
+            update_fun_info({Pid, MFA}, 
+                            {MFA, CallTree#fun_calltree.rec_cnt},
+                            [],
+                            CallTree#fun_calltree.start_ts,
+                            CallTree#fun_calltree.end_ts);
+       true -> ok
+    end,
     case MFA of 
         undefined ->
             Children=CallTree#fun_calltree.called,
@@ -2268,15 +2531,14 @@ process_a_call_tree_1(CallTree) ->
                                C#fun_calltree.cnt}
                               ||C <- CallTree#fun_calltree.called],
                              CallTree#fun_calltree.start_ts,
-                             CallTree#fun_calltree.end_ts),                             
+                             CallTree#fun_calltree.end_ts), 
             Children=CallTree#fun_calltree.called,
             [process_a_call_tree_1(C)||C <- Children]
     end.
 
       
 update_fun_call_time({Pid, Func}, {StartTs, EndTs}) ->
-  %%  io:format("update fun calltime:\n~p\n", [{{Pid, Func}, {StartTs, EndTs}}]),
-    Time =timer:now_diff(EndTs, StartTs),
+    Time =now_diff(EndTs, StartTs),
     PidValue = pid2value(Pid),
     case ets:lookup(fun_info, {PidValue, Func}) of 
         [] ->
@@ -2284,15 +2546,14 @@ update_fun_call_time({Pid, Func}, {StartTs, EndTs}) ->
                                            start_ts=StartTs,
                                            end_ts = EndTs,
                                            acc_time=Time});
-        [FunInfo] ->
+        [FunInfo] ->  %% This is not quite right whit recursive calls because 
+                       %% of the overlapping.
             ets:update_element(fun_info, {PidValue, Func},
                                [{#fun_info.acc_time, FunInfo#fun_info.acc_time+Time}])
-               
     end.
 
 %% -spec(update_fun_info({pid(), true_mfa()}, {true_mfa()|undefined, non_neg_integer()},
 %%                       [{true_mfa(), non_neg_integer()}], timestamp(), timestamp()) ->true).
-             
 update_fun_info({Pid, MFA}, Caller={_Func, Cnt}, Called, StartTs, EndTs) ->
     case ets:lookup(fun_info, {Pid, MFA}) of
         [] ->
@@ -2339,46 +2600,55 @@ add_to_1({Fun, CNT}, Acc) ->
 %% process_tree_size_1({_Parent, Children}) ->
 %%     1 + process_tree_size(Children).
 
-
+  
 -type process_tree()::{#information{},[process_tree()]}.
+
+-spec gen_compressed_process_tree/0::()->[process_tree()].
 gen_compressed_process_tree()->
     Trees = gen_process_tree(),
     put(last_index, 0),
     NewTrees=compress_process_tree(Trees),
     erase(last_index),
     NewTrees.
+    
 
 -spec gen_process_tree/0::()->[process_tree()].
 gen_process_tree() ->
-    Res = select({information,procs}),
-    List = lists:keysort(#information.start,Res),  
+    Res =ets:select(pdb_info, [{#information{id = {pid,'$1'},  
+                                             start='$2', children='$3', _='_'},
+                                [],[{{{{pid, '$1'}}, '$2','$3'}}]}]),
+    List = lists:keysort(2,Res),
     gen_process_tree(List, []).
 
--spec gen_process_tree/2::([#information{}], [process_tree()]) 
+-spec gen_process_tree/2::([{pid_value(),any(), any()}],[process_tree()]) 
                           -> [process_tree()].
 gen_process_tree([], Out) ->
     add_ancestors(Out);
-gen_process_tree([Elem|Tail], Out) ->
-    Children = Elem#information.children,
+gen_process_tree([_Item={Pid, _Start, Children}|Tail], Out) ->
     {ChildrenElems, Tail1} = lists:partition(
-                               fun(E) -> 
-                                       lists:member(E#information.id, Children) 
+                               fun({Pid1, _, _}) -> 
+                                       lists:member(Pid1, Children) 
                                end, Tail),
     {NewChildren, NewTail}=gen_process_tree_1(ChildrenElems, Tail1, []),
-    gen_process_tree(NewTail, [{Elem, NewChildren}|Out]).
+    [Parent] = ets:lookup(pdb_info, Pid),
+    gen_process_tree(NewTail, [{Parent, NewChildren}|Out]).
 
--spec gen_process_tree_1/3::([#information{}], [#information{}],[process_tree()]) 
-                          -> {[process_tree()], [#information{}]}.
+-spec gen_process_tree_1/3::([{pid_value(),any(), any()}],
+                             [{pid_value(),any(), any()}],
+                             [process_tree()])
+                            -> {[process_tree()],[{pid_value(),any(), any()}]}.
 gen_process_tree_1([], Tail, NewChildren) ->
     {NewChildren, Tail};
-gen_process_tree_1([C|Cs], Tail, Out) ->
-    Children = C#information.children,
+gen_process_tree_1([_C={Pid, _Start, Children}|Cs], Tail, Out) ->
     {ChildrenElems, Tail1} = lists:partition(
-                               fun(E) -> 
-                                       lists:member(E#information.id, Children)
-                               end, Tail),                           
+                               fun({Pid1, _, _}) -> 
+                                       lists:member(Pid1, Children) 
+                               end, Tail),
+    [Parent] = ets:lookup(pdb_info, Pid),
     {NewChildren, NewTail}=gen_process_tree_1(ChildrenElems, Tail1, []),
-    gen_process_tree_1(Cs, NewTail, [{C, NewChildren}|Out]).
+    gen_process_tree_1(Cs, NewTail, [{Parent, NewChildren}|Out]).
+
+
 
 -spec add_ancestors/1::([process_tree()])->[process_tree()].
 add_ancestors(ProcessTree) ->
@@ -2454,14 +2724,18 @@ compress_process_tree_3(ChildrenGroup) ->
                                           entry = EntryFun,
                                           start =lists:min([C1#information.start||{C1,_}<-Cs]),
                                           stop = lists:max([C1#information.stop||{C1, _}<-Cs]),
+                                          %% Total;
                                           msgs_received=lists:foldl(fun({P,_}, {R1Acc, R2Acc}) ->
                                                                             {R1, R2}=P#information.msgs_received,
                                                                             {R1+R1Acc, R2+R2Acc}
                                                                     end, {0,0}, Cs),
+                                          %% Total;
                                           msgs_sent = lists:foldl(fun({P, _}, {S1Acc, S2Acc}) ->
                                                                           {S1, S2} = P#information.msgs_sent,
                                                                           {S1+S1Acc, S2+S2Acc}
                                                                   end, {0,0}, Cs),
+                                          %%Total;
+                                          rq_history =lists:append([C1#information.rq_history||{C1,_}<-Cs]),
                                           hidden_pids = UnNamedProcs--[Proc#information.id]
                                          },
                     update_information_1(Info),
@@ -2555,4 +2829,15 @@ pid2value(Pid) when is_pid(Pid) ->
     {pid, {list_to_integer(P1), 
            list_to_integer(P2),
            list_to_integer(P3)}}.
+
+
+now_diff(EndTS,StartTS) ->
+    try timer:now_diff(EndTS, StartTS)
+    catch _E1:_E2 -> 0
+    end.
+   
+
+mk_proc_reg_name(RegNamePrefix,Index) ->
+    list_to_atom(RegNamePrefix ++ integer_to_list(Index)).
+
 

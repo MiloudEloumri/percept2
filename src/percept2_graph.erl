@@ -102,7 +102,25 @@ ports_graph(_Env, Input) ->
 scheduler_graph(_Env, Input) ->
     graph_1(_Env, Input, schedulers).
 
-graph_1(_Env, Input, Type) ->
+graph_1(Env, Input, Type) -> 
+    CacheKey = atom_to_list(Type)++integer_to_list(erlang:crc32(Input)),
+    case ets:info(history_html) of 
+        undefined ->
+            graph_2(Env, Input, Type);
+        _ ->
+            case ets:lookup(history_html, CacheKey) of 
+                [{history_html, CacheKey, Content}] ->
+                    Content;
+                [] ->
+                    Content= graph_2(Env, Input, Type),
+                    ets:insert(history_html, 
+                               #history_html{id=CacheKey,
+                                             content=Content}),
+                    Content
+            end
+    end.                
+
+graph_2(_Env, Input, Type) ->
     Query    = httpd:parse_query(Input),
     RangeMin = percept2_html:get_option_value("range_min", Query),
     RangeMax = percept2_html:get_option_value("range_max", Query),
@@ -110,21 +128,26 @@ graph_1(_Env, Input, Type) ->
     Width    = percept2_html:get_option_value("width", Query),
     Height   = percept2_html:get_option_value("height", Query),
     
-     % seconds2ts
     StartTs  = percept2_db:select({system, start_ts}),
-    TsMin    = percept2_html:seconds2ts(RangeMin, StartTs),
-    TsMax    = percept2_html:seconds2ts(RangeMax, StartTs),
+    TsMin    = percept2_html:seconds2ts(lists:max([RangeMin-0.1,0]), StartTs),
+    TsMax    = percept2_html:seconds2ts(RangeMax+0.1, StartTs),
     
-    % Convert Pids to id option list
-    IDs      = [{id, ID} || ID <- Pids],
-    case IDs/=[] of 
+    %% Convert Pids to id option list
+    IDs = [{pids, Pids}],
+    TypeOpt  = case Type of 
+                   procs_ports -> [{id, all}];
+                   procs -> [{id, procs}];
+                   ports -> [{id, ports}];
+                   _ ->[]
+               end,
+    case Pids/=[] of 
         true -> 
             Options  = [{ts_min, TsMin},{ts_max, TsMax} | IDs],
             Acts     = percept2_db:select({activity, Options}),
             Counts=percept2_analyzer:activities2count2(Acts, StartTs),
             percept2_image:graph(Width, Height,{RangeMin, 0, RangeMax, 0},Counts,120);
         false ->                
-            Options  = [{ts_min, TsMin},{ts_max, TsMax}],
+            Options  = TypeOpt++ [{ts_min, TsMin},{ts_max, TsMax}],
             Counts = case Type of 
                          procs_ports ->
                              [{?seconds(TS, StartTs), Procs, Ports}||
@@ -142,11 +165,18 @@ graph_1(_Env, Input, Type) ->
                                      <-percept2_db:select(
                                          {activity,{runnable_counts, Options}})];
                          schedulers ->
-                             Acts = percept2_db:select({scheduler, [{ts_min, TsMin}, {ts_max,TsMax}]}),
-                             [{?seconds(Ts, StartTs), Scheds, 0} ||
-                                 #scheduler{timestamp = Ts, active_scheds=Scheds} <- Acts]
+                             Acts = percept2_db:select({scheduler, Options}),
+                             Schedulers = erlang:system_info(schedulers), %% not needed if the trace info is correct!
+                             [{?seconds(Ts, StartTs), lists:min([Scheds,Schedulers]), 0} ||
+                                 #scheduler{timestamp = Ts, 
+                                            active_scheds=Scheds} <- Acts]
                      end,
-            percept2_image:graph(Width, Height, {RangeMin, 0, RangeMax, 0}, Counts,20)
+            case Counts of 
+                [] -> 
+                    percept2_image:error_graph(Width,Height, "No trace data recorded.");
+                _ ->
+                    percept2_image:graph(Width, Height, {RangeMin, 0, RangeMax, 0}, Counts,20)
+            end
     end.
 
 memory_graph(Env, Input) ->
@@ -160,10 +190,10 @@ activity_bar(_Env, Input, StartTs) ->
     Width  = percept2_html:get_option_value("width", Query),
     Height = percept2_html:get_option_value("height", Query),
     
-    Data    = percept2_db:select({activity, [{id, Pid}]}),
+    Data    = percept2_db:select({activity, {runnable, Pid}}),
     Activities = [{?seconds(Ts, StartTs), State, [{InOut, ?seconds(InOutTs, StartTs)}
                                                   ||{InOut, InOutTs}<-lists:reverse(InOuts)]} 
-                  || #activity{timestamp = Ts, state = State, in_out=InOuts} <- Data],
+                  || {Ts, State,InOuts} <- Data],
     percept2_image:activities(Width-50, Height, {Min,Max}, Activities).
 
 proc_lifetime(_Env, Input) ->

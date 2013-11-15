@@ -32,6 +32,8 @@
          stop/0
       	]).
 
+-compile(export_all).
+
 -include("../include/percept2.hrl").
 
 %%==========================================================================
@@ -45,7 +47,7 @@
         'all' | 'send' |'receive' |'procs'|'call'|'silent'|
         'return_to' |'running'|'exiting'|'garbage_collection'|
         'timestamp'|'cpu_timestamp'|'arity'|'set_on_spawn'|
-        'set_on_first_spawn'|'set_on_link'|'set_on_first_link'.
+        'set_on_first_spawn'|'set_on_link'|'set_on_first_link'|'ports'.
 
 -type profile_flags():: 
         'runnable_procs'|'runnable_ports'|'scheduler'|'exclusive'.
@@ -53,8 +55,9 @@
 -type module_name()::atom().
 -type percept_option() ::
       'concurreny' | 'message'| 'process_scheduling'
-      |{'mods', [module_name()]}.
-    
+      |{'mods', [module_name()|mfa()]}.
+
+
 %%==========================================================================
 %%
 %% 		Interface functions
@@ -62,9 +65,9 @@
 %%==========================================================================
 
 -spec start(FileSpec::file:filename()|
-                                {file:filename(), wrap, Suffix::string(),
-                                 WrapSize::pos_integer(), WrapCnt::pos_integer()}, 
-            Options::[percept_option()]) ->
+                      {file:filename(), wrap, Suffix::string(),
+                       WrapSize::pos_integer(), WrapCnt::pos_integer()}, 
+            Options::[trace_flags()|profile_flags()]) ->
                    {'ok', port()} | {'already_started', port()}.
 start(FileSpec, Options) ->
     profile_to_file(FileSpec,Options). 
@@ -77,7 +80,7 @@ start(FileSpec, Options) ->
                                 {file:filename(), wrap, Suffix::string(),
                                  WrapSize::pos_integer(), WrapCnt::pos_integer()},
 	    Entry :: {atom(), atom(), list()},
-            Options :: [percept_option()]) ->
+            Options :: [trace_flags()|profile_flags()|{callgraph, [module_name()]}]) ->
                    'ok' | {'already_started', port()} |
                    {'error', 'not_started'}.
 start(FileSpec, _Entry={Mod, Fun, Args}, Options) ->
@@ -110,6 +113,10 @@ stop() ->
                                       scheduler, exclusive]),
     erlang:trace(all, false, [all]),
     erlang:trace_pattern({'_', '_', '_'}, false, [local]),
+    case ets:info(percept2_spawn) of 
+        undefined -> ok;
+        _ -> ets:delete(percept2_spawn)
+    end,
     deliver_all_trace(), 
     case whereis(percept2_port) of
     	undefined -> 
@@ -152,15 +159,30 @@ profile_to_file(FileSpec, Opts) ->
     end.
 -spec(set_tracer(pid()|port(), [percept_option()]) -> ok).
 set_tracer(Port, Opts) ->
-    {TraceOpts, ProfileOpts, Mods} = parse_profile_options(Opts),
+    {TraceOpts, ProfileOpts, ModOrMFAs} = parse_profile_options(Opts),
     MatchSpec = [{'_', [], [{message, {{cp, {caller}}}}]}],
+    Mods = [M||M<-ModOrMFAs,is_atom(M)],
+    MFAs = [MFA||MFA={_M, _F, _A}<-ModOrMFAs],
     load_modules(Mods),
-    [erlang:trace_pattern({Mod, '_', '_'}, MatchSpec, [local])||Mod <- Mods],
-    erlang:trace(all, true, [{tracer, Port}, timestamp, call, return_to, 
-                             set_on_spawn, procs| TraceOpts]),
+    case Mods of 
+        [] -> ok;
+        _ ->
+            ets:new(?percept2_spawn_tab, [named_table, public, {keypos,1}, set]),
+            ets:insert(?percept2_spawn_tab, {mods, Mods})
+    end,
+    [erlang:trace_pattern(MFA, MatchSpec, [local])
+     ||Mod <- Mods, MFA<-module_funs(Mod)],
+    [erlang:trace_pattern(MFA, MatchSpec, [local])||MFA<-MFAs],
+    erlang:trace(all, true, [{tracer, Port}, timestamp,set_on_spawn| TraceOpts]),
     erlang:system_profile(Port, ProfileOpts),
     ok.
     
+
+module_funs(s_group) ->
+    [{s_group, new_s_group, 2}, {s_group, delete_s_group, 1},
+     {s_group, add_nodes, 2},  {s_group, remove_nodes, 2}];
+module_funs(Mod) ->
+    [{Mod, F, A}||{F, A}<-Mod:module_info(functions),hd(atom_to_list(F))/=$-].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 load_modules([]) ->
     ok;
@@ -175,72 +197,47 @@ load_modules([Mod|Mods]) ->
     end.
            
 -spec(parse_profile_options([percept_option()]) -> 
-             {[trace_flags()], [profile_flags()], [module_name()]}).
+             {[trace_flags()], [profile_flags()], [module_name()|mfa()]}).
 parse_profile_options(Opts) ->
     parse_profile_options(Opts, {[],[],[]}).
 
-parse_profile_options([], Out) ->
-    Out;
-parse_profile_options([Head|Tail],{TraceOpts, ProfileOpts, ModOpts}) ->
-    [Opt|Others] = get_flags(Head),
-    NewOpts = Others ++ Tail,
+parse_profile_options([], Out={TraceOpts, ProfileOpts, ModOpts}) ->
+    case lists:member(s_group, ModOpts) of 
+        true ->
+            {TraceOpts--[arity], ProfileOpts, ModOpts};
+        false ->
+            Out
+    end;
+parse_profile_options([Opt|Opts],{TraceOpts, ProfileOpts, ModOpts}) ->
     case Opt of
-	procs ->
-	    parse_profile_options(
-              NewOpts, 
-              {[procs|TraceOpts],
-               [runnable_procs|ProfileOpts], ModOpts});
-	ports ->
-	    parse_profile_options(
-              NewOpts,
-              {[ports|TraceOpts],
-               [runnable_ports|ProfileOpts], ModOpts});
-        scheduler ->
-	    parse_profile_options(
-              NewOpts, 
-              {TraceOpts,
-               [scheduler|ProfileOpts], ModOpts});
-        exclusive ->
-	    parse_profile_options(
-              NewOpts, 
-              {TraceOpts,
-               [exclusive| ProfileOpts], ModOpts});
-        {mods, Mods} ->
+        {callgraph, Mods} ->
             parse_profile_options(
-              NewOpts, 
-              {[call, return_to, arity|TraceOpts],
-               ProfileOpts, Mods ++ ModOpts});
+              Opts, {TraceOpts, ProfileOpts, Mods ++ ModOpts});
+        s_group ->
+            parse_profile_options(
+               Opts, {TraceOpts, ProfileOpts, [s_group|ModOpts]});
 	_ -> 
-            case lists:member(Opt, trace_flags()) orelse
-                lists:member(Opt, profile_flags()) of
+            case lists:member(Opt, trace_flags()) of 
                 true ->
                     parse_profile_options(
-                      NewOpts, {[Opt|TraceOpts], ProfileOpts, ModOpts});
-                false ->
-                    parse_profile_options(
-                      NewOpts, {TraceOpts, ProfileOpts, ModOpts})
+                      Opts, {[Opt|TraceOpts], ProfileOpts, ModOpts});
+                false -> case lists:member(Opt,profile_flags()) of 
+                             true ->
+                                 parse_profile_options(
+                                   Opts, {TraceOpts, [Opt|ProfileOpts], ModOpts});
+                             false ->
+                                 parse_profile_options(
+                                   Opts, {TraceOpts, ProfileOpts, ModOpts})
+                         end
             end
     end.
-
-get_flags(concurrency) ->
-    [procs, ports, scheduler];
-get_flags(process_scheduling)->
-    [running, exiting, scheduler_id];
-get_flags(message) ->
-    [send, 'receive'];
-get_flags(gc) ->
-    [garbage_collection];
-get_flags(Flag={'mods', _MFAs}) ->
-    [Flag];
-get_flags(Flag) ->
-    [Flag].
 
 trace_flags()->
     ['all','send','receive','procs','call','silent',
      'return_to','running','exiting','garbage_collection',
      'timestamp','cpu_timestamp','arity','set_on_spawn',
      'set_on_first_spawn','set_on_link','set_on_first_link',
-     'scheduler_id'].
+     'scheduler_id', 'ports'].
                
 profile_flags()->        
     ['runnable_procs','runnable_ports','scheduler','exclusive'].

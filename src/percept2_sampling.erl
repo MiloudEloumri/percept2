@@ -43,19 +43,21 @@
 
 -module(percept2_sampling).
 
--export([sample/3, sample/4, sample/5]).
+-export([start/3, start/4, start/5, stop/0]).
 
 -export([init/5]).
 
 %%@hidden
--type sample_items():: 
+-type sample_item():: 
         'run_queue'|'run_queues'|'scheduler_utilisation'|
         'process_count'| 'schedulers_online'|'mem_info'|
-        {'message_queue_len', pid()|regname()}.
+        {'message_queue_len', pid()|regname()}|'all'.
+%% the 'all' options covers all the the options apart from 'message_queue_len'.
 
 -type entry_mfa() :: {atom(), atom(),list()}.
 -type regname() :: atom().
 -type milliseconds()::non_neg_integer().
+-type seconds()::non_neg_integer().
 
 -record(run_queue_info,
         {timestamp::float(), 
@@ -94,8 +96,9 @@
           timestamp ::float(),
           message_queue_len ::non_neg_integer()}).
 
+-compile(export_all).
 
--define(INTERVAL, 1). % in milliseconds
+-define(INTERVAL, 10). % in milliseconds
 
 -define(seconds(EndTs,StartTs), 
         timer:now_diff(EndTs, StartTs)/1000000).
@@ -121,22 +124,26 @@ sample_items()->
      'scheduler_utilisation',
      'process_count',
      'schedulers_online',
-     'mem_info',
-     'message_queue_len'].
+     'mem_info'
+    ].
 
 %%@hidden
--spec(check_sample_items([sample_items()]) -> ok).
-check_sample_items([{'message_queue_len', _}|Items])->
-    check_sample_items(Items);
-check_sample_items([Item|Items]) ->
+-spec(check_sample_items([sample_item()]) -> [sample_item()]).
+check_sample_items(Items) ->
+    check_sample_items_1(Items, []).
+check_sample_items_1([{'message_queue_len', Proc}|Items], Acc)->
+    check_sample_items_1(Items, [{'message_queue_len', Proc}|Acc]);
+check_sample_items_1(['all'|Items], Acc) ->
+    check_sample_items_1(Items, sample_items()++Acc);
+check_sample_items_1([Item|Items], Acc) ->
     case lists:member(Item, sample_items()) of
         true ->
-            check_sample_items(Items);
+            check_sample_items_1(Items, [Item|Acc]);
         false ->
             error(lists:flatten(io_lib:format("Invalid option:~p", [Item])))
     end;
-check_sample_items([]) ->
-    ok.
+check_sample_items_1([], Acc) ->
+    lists:usort(Acc).
 
 
 check_out_dir(Dir) ->
@@ -173,77 +180,85 @@ check_out_dir(Dir) ->
 %%<ul>
 %% `message_queue_len': returns the number of messages currently in the message queue of the process.
 %%</ul>
+%%<ul>
+%% `all':  this option covers all the above options apart from `message_queue_len'.
+%%</ul>
 %%If an entry function is specified, this function profiles the system 
 %% for the whole duration until the entry function returns; otherwise it profiles 
 %% the system for the time period specified. The system is probed at the default 
-%% time intervals, which is 100 milliseconds.
+%% time interval, which is 10 milliseconds. It is also possible to stop the sampling 
+%% manually using <a href="percept2_sampling.html#stop-0">stop/0</a>,
 %%
-%% `OutDir' tells the profiler where to put the data files generated. A data file is generated 
-%% for each type of information in `Items'. For an item `A', the name of the data file could be 
-%% `sample_A.dat'. Profiling data is formatted in the way so that the graph plotting tool `Gnuplot' 
-%%  can be used for visualisation. A pre-defined plotting script is available for each type of 
-%%  information collected, and these scripts are in the `percept2/gplt' directory. To use the 
-%%  one of the pre-defined plotting scripts to viusalise the data collected, the following steps
-%%  can be followed. We assume Gnuplot is already installed, otherwise install it first.
+%% `OutDir' tells the tool where to put the data files generated. A data file is generated 
+%% for each type of information in `Items'. For an item `A', the name of the data file would be 
+%% `sample_A.dat'. 
 %%
-%% 1) start the Gnuplot tool.
+%%  Sampling data is formatted in a way so that the graph plotting tool `Gnuplot' 
+%%  can be used for visualisation.  A pre-defined plotting script is available for 
+%%  each type of information collected, and these scripts are in the `percept2/gplt' directory. 
+%%  If you are familiar with Gnuplot, you could generate the diagrams in Gnuplot command-line. 
+%%  Alternately, you could visualise the sampling data through Percept2, which uses Gnuplot to 
+%%  generate the graphs behind the scene. (It is likely that we will get rid of the dependence to 
+%%  Gnuplot in the future).
+%% 
+%%  To visualise the sampling data, one could select the `Visualise sampling data' from the Percept2 main menu, 
+%%  and this should lead to a page as shown in the screenshot next. 
 %%
-%% 2) in gnuplot, go to the `OutDir' directory, in which the data files are stored. 
+%% <img src="percept2_sample.png"  alt="Visualise sampling data"  width="850" height="500"> </img>
 %%
-%% 3) load the corresponding gnuplot script for the data to be visualised. For 
-%%    example, to visualise the memory usage data in file `sample_mem_info.dat', 
-%%    the gnuplot script to load is `/path/to/sample_mem_info.plt'. The snapshot
-%%    next shows an example output the memory usage graph.
+%% In this page, select the type of data you would like to see, enter the data file name, and the 
+%% path leading to this file, then click on the `Generate Graph' button. This should leads to a page showing 
+%% the graph. The screenshot next shows an example output.
 %%
 %%  <img src="percept2_sample_mem.png"
 %%  alt="the front page of Percept2"  width="850" height="500"> </img>
-
--spec(sample(Items::[any()],  %%[sample_items()],
-             EntryOrTime::entry_mfa()|milliseconds(),
-             OutDir::file:filename())
-      ->ok).
-sample(Items, Time, OutDir) when is_integer(Time)->
-    sample(Items, Time, ?INTERVAL,
-           fun(_) -> true end, OutDir);
-sample(Items, Entry={_Mod, _Fun, _Args},OutDir) ->
-    sample(Items, Entry, ?INTERVAL, fun(_)-> true end,OutDir).
+%%
+-spec(start(Items :: [sample_item()],
+            EntryOrTime :: entry_mfa()  | milliseconds(),
+            OutDir :: file:filename()) -> 
+               ok).  %%[sample_items()],
+start(Items, Time, OutDir) when is_integer(Time) ->
+    start(Items, Time, ?INTERVAL,
+          fun(_) -> true end, OutDir);
+start(Items, Entry={_Mod, _Fun, _Args}, OutDir) ->
+    start(Items, Entry, ?INTERVAL, fun(_) -> true end, OutDir).
 
 %%@doc Start the profiler and collects information about the system.
 %%
-%% Different from <a href="percept2_sampling.html#sample-2">sample/2</a>,
-%% the function allows the user to specify the time interval.
--spec(sample(Items::[any()],  %%[sample_items()],
-             EntryOrTime::entry_mfa()|milliseconds(),
-             TimeInterval::milliseconds(), OutDir::file:filename())->ok).         
-sample(Items, Time, TimeInterval, OutDir) when is_integer(Time)->
-    sample(Items, Time, TimeInterval,fun(_) -> true end, OutDir);
-sample(Items, Entry={_Mod, _Fun, _Args}, TimeInterval, OutDir) ->
-    sample(Items,Entry, TimeInterval, fun(_) ->true end,OutDir).
+%% Different from <a href="percept2_sampling.html#start-3">start/3</a>,
+%% this function allows the user to specify the time interval.
+-spec(start(Items :: [any()], EntryOrTime :: entry_mfa()  | seconds(),
+            TimeInterval :: milliseconds(), OutDir :: file:filename()) -> 
+               ok).  %%[sample_items()],         
+start(Items, Time, TimeInterval, OutDir) when is_integer(Time) ->
+    start(Items, Time, TimeInterval, fun(_) -> true end, OutDir);
+start(Items, Entry={_Mod, _Fun, _Args}, TimeInterval, OutDir) ->
+    start(Items, Entry, TimeInterval, fun(_) -> true end, OutDir).
    
 %%@doc Start the profiler and collects information about the system.
 %%
 %% Apart from allowing the user to specify the time interval, this 
 %% function also allows the user to supply a filter function, so that 
 %% only those data that satisfy certain condition are logged.
-%% See <a href="percept2_sampling.html#sample-2">sample/2</a>.
--spec(sample(Items::[any()],  %%[sample_items()],
-             EntryOrTime::entry_mfa()|milliseconds(),
-             TimeInterval::milliseconds(),
-             fun((_)-> boolean()),
-                OutDir::file:filename()) -> ok).
-sample(Items, _Entry={Mod, Fun, Args}, TimeInterval, FilterFun, OutDir) ->
+%% See <a href="percept2_sampling.html#start-3">start/3</a>.
+-spec(start(Items :: [any()], EntryOrTime :: entry_mfa()  | seconds(),
+            TimeInterval :: milliseconds(), fun((_) ->  boolean()),
+            OutDir :: file:filename()) -> 
+               ok).  %%[sample_items()],
+start(Items, _Entry={Mod, Fun, Args}, TimeInterval, FilterFun, OutDir) ->
     ok=check_out_dir(OutDir),
-    ok=check_sample_items(Items),
-    Pid = start_sampling(Items, TimeInterval, FilterFun, OutDir),
+    Items1=check_sample_items(Items),
+    Pid = start_sampling(Items1, TimeInterval, FilterFun, OutDir),
     erlang:apply(Mod, Fun, Args),
-    stop_sampling(Pid);
-sample(Items, Time, TimeInterval, FilterFun, OutDir) 
+    stop(Pid);
+start(Items, Time, TimeInterval, FilterFun, OutDir)
   when is_integer(Time)->
     ok=check_out_dir(OutDir),
-    ok=check_sample_items(Items),
+    Items1=check_sample_items(Items),
     try 
-        Pid=start_sampling(Items, TimeInterval, FilterFun, OutDir),
-        erlang:start_timer(Time, Pid, stop)
+        Pid=start_sampling(Items1, TimeInterval, FilterFun, OutDir),
+        erlang:start_timer(Time*1000, Pid, stop),
+        Pid
     catch
         throw:Term -> Term;
         exit:Reason -> {'EXIT',Reason};
@@ -262,22 +277,36 @@ start_sampling(Items, TimeInterval, FilterFun, OutDir) ->
         _ -> ok
     end,
     spawn_link(?MODULE, init, [now(), Items, TimeInterval, FilterFun, OutDir]).
-   
-stop_sampling(Pid) ->
+
+%%@doc Stop the sampling.
+-spec (stop() ->{error, not_started}|ok).
+stop() ->   
+    case whereis(percept2_sampling) of 
+        undefined ->
+            {error, not_started};
+        Pid ->
+            Pid ! stop,
+            ok
+    end.
+                
+stop(Pid) ->
     Pid!stop,
     ok.
 
 %%@private
 init(StartTs, Items, Interval, FilterFun, OutDir) ->
+    register(percept2_sampling, self()),
     create_ets_tables(Items),
     sampling_loop(StartTs, Interval, Items, FilterFun, OutDir).
+  
   
 sampling_loop(StartTs, Interval, Items, FilterFun, OutDir) ->
     receive
         stop -> 
             write_data(Items, OutDir);
         {timeout, _TimerRef, stop} -> 
-            write_data(Items, OutDir)
+            write_data(Items, OutDir),
+            io:format("Done.\n")    
     after Interval->
             do_sampling(Items,StartTs),
             sampling_loop(StartTs, Interval, Items, FilterFun, OutDir)
@@ -377,19 +406,19 @@ do_write_sample_info(Item, OutDir) ->
 
 read_data_from_tab(mem_info) ->
     Tab = mk_ets_tab_name(mem_info),
-    lists:flatten(ets:foldr(fun(_Data={_, Secs, Total, Procs, ETS, Atom, Code, Binary}, Acc) ->
-                      [io_lib:format("~p  ~p  ~p   ~p  ~p  ~p ~p \n",
-                                     [Secs, Total, Procs, ETS, Atom, Code, Binary])|Acc]
-              end,[],Tab));
+    lists:flatten(["#mem_info\n"|ets:foldr(fun(_Data={_, Secs, Total, Procs, ETS, Atom, Code, Binary}, Acc) ->
+                                                   [io_lib:format("~p  ~p  ~p   ~p  ~p  ~p ~p \n",
+                                                                  [Secs, Total, Procs, ETS, Atom, Code, Binary])|Acc]
+                                           end,[],Tab)]);
 read_data_from_tab(run_queue) ->
     Tab = mk_ets_tab_name(run_queue),
-    lists:flatten(ets:foldr(fun(_Data={_, Secs, RunQueue}, Acc) ->
+    lists:flatten(["#run_queue\n"|ets:foldr(fun(_Data={_, Secs, RunQueue}, Acc) ->
                              [io_lib:format("~p  ~p \n",
                                             [Secs,RunQueue])|Acc]
-                     end, [], Tab));
+                                            end, [], Tab)]);
 read_data_from_tab(run_queues) ->
     Tab = mk_ets_tab_name(run_queues),
-    lists:flatten(ets:foldr(fun(_Data={_, Secs, RunQueues}, Acc) ->
+    lists:flatten(["#run_queues\n"|ets:foldr(fun(_Data={_, Secs, RunQueues}, Acc) ->
                                     {_, RunQueues1} = lists:foldl(
                                                    fun(Len, {Sum, RQAcc}) ->
                                                            {Len+Sum,[Len+Sum|RQAcc]}
@@ -398,7 +427,7 @@ read_data_from_tab(run_queues) ->
                                                        ||Len<-RunQueues1]),
                                     [io_lib:format("~p  ~s \n",
                                                    [Secs,Str])|Acc]
-                            end,[], Tab));
+                            end,[], Tab)]);
 read_data_from_tab(scheduler_utilisation) ->
     Tab = mk_ets_tab_name(scheduler_utilisation),
     {_, Acc1}=ets:foldr(
@@ -411,33 +440,33 @@ read_data_from_tab(scheduler_utilisation) ->
                                                      {{I, A0, T0}, {I, A1, T1}}<-lists:zip(SchedulerWallTime0,
                                                                                            SchedulerWallTime1)],
                                 {_, SchedUtilisation1} = lists:foldl(
-                                                           fun(Util, {Sum, UtilAcc}) ->
-                                                                   {Util+Sum,[Util+Sum|UtilAcc]}
-                                                           end, {0, []}, SchedUtilisation),
+                                                          fun(Util, {Sum, UtilAcc}) ->
+                                                                    {Util+Sum,[Util+Sum|UtilAcc]}
+                                                            end, {0, []}, SchedUtilisation),
                                 Str=[io_lib:format(" ~p", [Val])
                                      ||Val<-SchedUtilisation1],
-                                {SchedulerWallTime1,[io_lib:format("~p ",[Secs]), Str++"\n"|Acc]}
+                                {SchedulerWallTime1,[io_lib:format("~p ",[Secs]), Str++" \n"|Acc]}
                         end
-                end,{none, []}, Tab),
-    lists:flatten(Acc1);
+                end,{none, ["#scheduler_utilisation\n"]}, Tab),
+    lists:flatten(["#scheduler_utilisation\n"|Acc1]);
 read_data_from_tab(process_count) ->
     Tab = mk_ets_tab_name(process_count),
-    lists:flatten(ets:foldr(fun(_Data={_, Secs, ProcsCount}, Acc) ->
-                             [io_lib:format("~p  ~p \n",
-                                            [Secs,ProcsCount])|Acc]
-                     end,[], Tab));
+    lists:flatten(["#process_count\n"|ets:foldr(fun(_Data={_, Secs, ProcsCount}, Acc) ->
+                                                        [io_lib:format("~p  ~p \n",
+                                                                       [Secs,ProcsCount])|Acc]
+                                                end,[], Tab)]);
 read_data_from_tab(schedulers_online) ->
     Tab = mk_ets_tab_name(schedulers_online),
-    lists:flatten(ets:foldr(fun(_Data={_, Secs, ProcsCount}, Acc) ->
-                      [io_lib:format("~p  ~p \n",
-                                     [Secs,ProcsCount])|Acc]
-              end,[], Tab));
+    lists:flatten(["#schedulers_online\n"|ets:foldr(fun(_Data={_, Secs, ProcsCount}, Acc) ->
+                                                            [io_lib:format("~p  ~p \n",
+                                                                           [Secs,ProcsCount])|Acc]
+                                                    end,[], Tab)]);
 read_data_from_tab(message_queue_len) ->
     Tab = mk_ets_tab_name(message_queue_len),
-    lists:flatten(ets:foldr(fun(_Data={_, Secs, MsgQueueLen}, Acc) ->
-                                    [io_lib:format("~p  ~p \n",
-                                                   [Secs, MsgQueueLen])|Acc]
-                            end,[], Tab)).
+    lists:flatten(["#message_queue_len\n"|ets:foldr(fun(_Data={_, Secs, MsgQueueLen}, Acc) ->
+                                                            [io_lib:format("~p  ~p \n",
+                                                                           [Secs, MsgQueueLen])|Acc]
+                                                    end,[], Tab)]).
 
 write_data([{Item, _Args}|Items], OutDir) ->
     do_write_sample_info(Item, OutDir),
@@ -452,9 +481,6 @@ to_megabytes(Bytes) ->
     Bytes/1000000.
 
 %% Example commands
-%% percept2_sampling:sample( ['run_queue','run_queues','scheduler_utilisation',
-%%                            'process_count', 'schedulers_online','mem_info'],
-%%                          {refac_sim_code_par_v3,sim_code_detection, [["c:/cygwin/home/hl/test"], 5, 40, 2, 4, 0.8, 
+%% percept2_sampling:sample( ['all'[["c:/cygwin/home/hl/test"], 5, 40, 2, 4, 0.8, 
 %%                                                                      ["c:/cygwin/home/hl/test"],8]},"../profile_data").
-%% percept2_sampling:sample(['run_queue','run_queues','scheduler_utilisation',
-%%                            'process_count', 'schedulers_online','mem_info', {'message_queue_len', 'percept_db'}], {percept2, analyze, [["sim_code.dat"]]}, ".").
+%%percept2_sampling:sample([all, {'message_queue_len', 'percept2_db'}], {percept2, analyze, [["sim_code.dat"]]}, ".").

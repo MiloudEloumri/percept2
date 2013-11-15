@@ -89,40 +89,43 @@ activities2count2([], _, _, _, Out) -> lists:reverse(Out);
 activities2count2([#activity{id = Id, timestamp = Ts, state = State} | Acts], StartTs, {Proc,Port}, StateDict, Out) ->
     case dict:find(Id, StateDict) of
         {ok, State} ->
-            activities2count2(Acts, StartTs, {Proc, Port}, StateDict, [{?seconds(Ts, StartTs), Proc, Port}|Out]);
+            activities2count2(Acts, StartTs, {Proc, Port}, StateDict,
+                              [{?seconds(Ts, StartTs), Proc, Port}|Out]);
         _ ->
             activities2count3([#activity{id = Id, timestamp = Ts, state = State} | Acts],
-                              StartTs, {Proc, Port}, StateDict,[{?seconds(Ts, StartTs), Proc, Port}|Out])
+                              StartTs, {Proc, Port}, StateDict,Out)
+                              %% [{?seconds(Ts, StartTs), Proc, Port}|Out])
     end.
                           
-activities2count3([#activity{id = Id={pid, _}, timestamp = Ts, state = active} | Acts], StartTs, {Proc,Port}, StateDict, Out) ->
+activities2count3([#activity{id = Id={pid, _}, timestamp = Ts, state = active} | Acts],
+                  StartTs, {Proc,Port}, StateDict, Out) ->
     activities2count2(Acts, StartTs, {Proc + 1, Port}, dict:store(Id, active, StateDict),
                       [{?seconds(Ts, StartTs), Proc + 1, Port}|Out]);
-activities2count3([#activity{ id =Id={pid, _}, timestamp = Ts, state = inactive} | Acts], StartTs, {Proc,Port}, StateDict, Out) ->
-    activities2count2(Acts, StartTs, {Proc - 1, Port},  dict:store(Id, inactive, StateDict),
+activities2count3([#activity{ id =Id={pid, _}, timestamp = Ts, state = inactive} | Acts],
+                  StartTs, {Proc,Port}, StateDict, Out) ->
+    activities2count2(Acts, StartTs, {Proc - 1, Port}, dict:store(Id, inactive, StateDict),
                       [{?seconds(Ts, StartTs), Proc - 1, Port}|Out]);
-activities2count3([#activity{ id = Id, timestamp = Ts, state = active} | Acts], StartTs, {Proc,Port}, StateDict, Out) when is_port(Id) ->
-    activities2count2(Acts, StartTs, {Proc, Port + 1},  dict:store(Id, active, StateDict), 
+activities2count3([#activity{ id = Id, timestamp = Ts, state = active} | Acts],
+                  StartTs, {Proc,Port}, StateDict, Out) when is_port(Id) ->
+    activities2count2(Acts, StartTs, {Proc, Port + 1}, dict:store(Id, active, StateDict),
                       [{?seconds(Ts, StartTs), Proc, Port + 1}|Out]);
-activities2count3([#activity{ id = Id, timestamp = Ts, state = inactive} | Acts], StartTs, {Proc,Port}, StateDict, Out) when is_port(Id) ->
-    activities2count2(Acts, StartTs, {Proc, Port - 1},  dict:store(Id, inactive, StateDict),
+activities2count3([#activity{ id = Id, timestamp = Ts, state = inactive} | Acts],
+                  StartTs, {Proc,Port}, StateDict, Out) when is_port(Id) ->
+    activities2count2(Acts, StartTs, {Proc, Port - 1}, dict:store(Id, inactive, StateDict),
                       [{?seconds(Ts, StartTs), Proc, Port - 1}|Out]).
-
-
-inactive_start_states(Acts) -> 
+inactive_start_states(Acts) ->
     D = activity_start_states(Acts, dict:new()),
     dict:fold(fun
-        ({pid, _}, inactive, {Procs, Ports})  -> {Procs + 1, Ports};
+        ({pid, _}, inactive, {Procs, Ports}) -> {Procs + 1, Ports};
         (K, inactive, {Procs, Ports}) when is_port(K) -> {Procs, Ports + 1};
-        (_, _, {Procs, Ports})                        -> {Procs, Ports}
+        (_, _, {Procs, Ports}) -> {Procs, Ports}
     end, {0,0}, D).
 activity_start_states([], D) -> D;
 activity_start_states([#activity{id = Id, state = State}|Acts], D) ->
     case dict:is_key(Id, D) of
-        true  -> activity_start_states(Acts, D);
+        true -> activity_start_states(Acts, D);
         false -> activity_start_states(Acts, dict:store(Id, State, D))
     end.
-
 
 
 %% @spec activities2count(#activity{}, timestamp()) -> Result
@@ -211,45 +214,49 @@ waiting_activities(Activities) ->
 waiting_activities_mfa_list([], ListedMfas) -> ListedMfas;
 waiting_activities_mfa_list([Activity|Activities], ListedMfas) ->
     #activity{id = Pid, state = Act, timestamp = Time, where = MFA, in_out=_InOut} = Activity,
-    case Act of 
-    	active ->
-	    waiting_activities_mfa_list(Activities, ListedMfas);
-	inactive ->
-	    % Want to know how long the wait is in a receive,
-	    % it is given via the next activity
-	    case Activities of
-	    	[] -> 
-                        [Info] = percept2_db:select({information, Pid}),
-                        case Info#information.stop of
-			    undefined ->
-			        % get profile end time
-			        Waited = ?seconds((percept2_db:select({system,stop_ts})),Time);
-			    Time2 ->
-			        Waited = ?seconds(Time2, Time)
-		        end,
-		        case get({waiting_mfa, MFA}) of
-			    undefined ->
-                                put({waiting_mfa, MFA}, {Waited, [Waited]}),
-			        [MFA | ListedMfas];
-		    	{Total, TimedMfa} ->
-                            put({waiting_mfa, MFA}, {Total + Waited, [Waited | TimedMfa]}),
-			    ListedMfas
-		    end;
-		[#activity{timestamp=Time2, id = Pid, state = active} | _ ] ->
-		    % Calculate waiting time
-                    Waited = ?seconds(Time2, Time),
-		    % Get previous entry
-   		    case get({waiting_mfa, MFA}) of
-		    	undefined ->
-			    % add entry to list
-                            put({waiting_mfa, MFA}, {Waited, [Waited]}),
-			    waiting_activities_mfa_list(Activities, [MFA|ListedMfas]);
-			{Total, TimedMfa} ->
-                            put({waiting_mfa, MFA}, {Total + Waited, [Waited | TimedMfa]}),
-			    waiting_activities_mfa_list(Activities, ListedMfas)
-		    end;
-		 _ -> error
-	    end
+    if MFA == undefined ->
+            waiting_activities_mfa_list(Activities, ListedMfas);
+       true ->
+            case Act of 
+                active ->
+                    waiting_activities_mfa_list(Activities, ListedMfas);
+                inactive ->
+                                                % Want to know how long the wait is in a receive,
+                                                % it is given via the next activity
+                    case Activities of
+                        [] -> 
+                            [Info] = percept2_db:select({information, Pid}),
+                            case Info#information.stop of
+                                undefined ->
+                                                % get profile end time
+                                    Waited = ?seconds((percept2_db:select({system,stop_ts})),Time);
+                                Time2 ->
+                                    Waited = ?seconds(Time2, Time)
+                            end,
+                            case get({waiting_mfa, MFA}) of
+                                undefined ->
+                                    put({waiting_mfa, MFA}, {Waited, [Waited]}),
+                                    [MFA | ListedMfas];
+                                {Total, TimedMfa} ->
+                                    put({waiting_mfa, MFA}, {Total + Waited, [Waited | TimedMfa]}),
+                                    ListedMfas
+                            end;
+                        [#activity{timestamp=Time2, id = Pid, state =active} | _ ] ->
+                                                % Calculate waiting time
+                            Waited = ?seconds(Time2, Time),
+                                                % Get previous entry
+                            case get({waiting_mfa, MFA}) of
+                                undefined ->
+                                                % add entry to list
+                                    put({waiting_mfa, MFA}, {Waited, [Waited]}),
+                                    waiting_activities_mfa_list(Activities, [MFA|ListedMfas]);
+                                {Total, TimedMfa} ->
+                                    put({waiting_mfa, MFA}, {Total + Waited, [Waited | TimedMfa]}),
+                                    waiting_activities_mfa_list(Activities, ListedMfas)
+                            end;
+                        _ -> error
+                    end
+            end
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

@@ -28,7 +28,7 @@
 -type pid_value()::{pid, {non_neg_integer(), non_neg_integer()|atom(), non_neg_integer()}}.
 
 %% for removing warnings from dialyzer.
--type special_atom()::'_'|'$0'|'$1'|'$2'|'$3'|'$4'|'$5'.
+-type special_atom()::'_'|'$0'|'$1'|'$2'|'$3'|'$4'|'$5'|'$6'.
 %%% -------------------	%%%
 %%% 	Records		%%%
 %%% -------------------	%%%
@@ -36,7 +36,8 @@
           timestamp 		 :: timestamp()|special_atom(), 
           id 			 :: pid_value() | port()|special_atom(),
           state = undefined	 :: state() | 'undefined'|special_atom(),
-          where = undefined	 :: true_mfa() | 'undefined'|special_atom(),
+          where = undefined	 :: true_mfa() | 'undefined'|'suspend'|'garbage_collect'
+                                  |special_atom(),
           runnable_procs=0       :: integer()|special_atom(),
           runnable_ports=0       :: integer()|special_atom(),
           in_out = []            :: [{atom(), timestamp()}]|special_atom()
@@ -50,9 +51,11 @@
           }).
 
 -record(information, {
-          id			 :: pid_value() | port()|special_atom(), 
+          id			 :: pid_value() | port()|special_atom()|{pid, special_atom()},
           name = undefined	 :: atom()| string()|'undefined'|special_atom(), 
-          entry = undefined	 :: true_mfa()|'undefined'|special_atom(), 
+          entry = undefined	 :: true_mfa()|'undefined'|'suspend'|'garbage_collect'|
+                                    special_atom()|
+                                    {special_atom(),special_atom(), special_atom()}, 
           start = undefined 	 :: timestamp()|'undefined'|special_atom(),
           stop = undefined	 :: timestamp()|'undefined'|special_atom(), 
           parent = undefined 	 :: pid_value()|'undefined'|special_atom(),
@@ -65,10 +68,10 @@
           hidden_pids = []       :: [pid_value()]|special_atom()
 	}).
  
--record(inter_node, {
-          timed_from_node    ::{timestamp(),node()}|{special_atom(), special_atom()},
-          to_node            ::node()|special_atom(),
-          msg_size           ::pos_integer()|special_atom()
+-record(inter_proc, {
+          timed_from    ::{timestamp(),node(), pid()|pid_value()}|{special_atom(), special_atom(), special_atom()},
+          to            ::{node(), pid()}|{special_atom(), special_atom()}|special_atom(),
+          msg_size      ::pos_integer()|special_atom()
          }).
 
 
@@ -79,20 +82,24 @@
          }).
 
 -record(funcall_info, {
-          id                 ::{pid_value(),timestamp()}|{special_atom(),special_atom()},       
-          func               ::true_mfa() | special_atom(),
-          end_ts=undefined   ::timestamp()|undefined|special_atom()
+          id                 ::{pid_value(),timestamp(), timestamp()}|
+                               {special_atom(),special_atom(), special_atom()},       
+          func               ::true_mfa()|special_atom()|suspend|garbage_collect
          }).
                  
 -record(fun_calltree, {
-          id                     ::{pid_value()|special_atom(), true_mfa()|undefined|special_atom(), 
+          id                     ::{pid_value()|special_atom(), true_mfa()|undefined
+                                    |'suspend'|'garbage_collect'|special_atom(), 
                                     timestamp()|special_atom()}|
-                                   {pid_value()|special_atom(), true_mfa()|undefined|special_atom(), true_mfa()|special_atom()}|
+                                   {pid_value()|special_atom(), true_mfa()|undefined
+                                    |'suspend'|'garbage_collect'|special_atom(), 
+                                    true_mfa()|special_atom()}|
                                    {special_atom(), special_atom(), special_atom()}|
                                    special_atom(),
           cnt =1                 ::non_neg_integer()|special_atom(),
           rec_cnt=0              ::non_neg_integer()|special_atom(),
           called =[]             ::[#fun_calltree{}]|special_atom(),
+          acc_time = 0           ::non_neg_integer()|special_atom(),
           start_ts = undefined   ::timestamp()|undefined|special_atom(),
           end_ts = undefined     ::timestamp()|undefined|special_atom()
          }).
@@ -108,9 +115,22 @@
          }).
 
 
+-record(msg_queue_len, {
+          pid         ::pid_value()|port()|special_atom()|{pid, special_atom()},
+          timestamp   ::timestamp()|special_atom(),
+          len =0      ::non_neg_integer()
+         }).
+
+-type s_group_op()::new_s_group|delete_s_group|add_nodes|remove_nodes.
+
+-record(s_group, 
+        {timed_node:: {timestamp(),node()},
+         op :: {s_group_op(), [term()]}
+        }).
+          
 -record(history_html, {
           id         ::string(),
-          content    ::string()|{string(), string()}
+          content    ::any()
          }).
 
 
@@ -119,9 +139,10 @@
 %%% -------------------	%%%
 -define(seconds(EndTs,StartTs), timer:now_diff(EndTs, StartTs)/1000000).
 
-%% -define(debug, 9).
+-define(percept2_spawn_tab, percept2_spawn).
+%%-define(debug, 9).
 
-%% -define(debug, -1).
+%%-define(debug, -1).
 
 -ifdef(debug). 
 dbg(Level, F, A) when Level >= ?debug ->

@@ -41,21 +41,22 @@
 %% graph(Widht, Height, Range, Data)
 
 graph(Width,Height,{RXmin, RYmin, RXmax, RYmax},Data,HO) ->
-    Data2 = case Data of 
-                [] -> [];
-                _ -> 
-                    {_, Proc, Port} = lists:last(Data),
-                    Last = {RXmax, Proc, Port}, 
-                    [{X, Y1 + Y2} 
-                     ||{X, Y1, Y2} <- lists:reverse([Last|lists:reverse(Data)])]
-            end,
-    MinMax = minmax(Data2),
-    {Xmin, Ymin, Xmax, Ymax} = MinMax, 
-    graf1(Width, Height,{	lists:min([RXmin, Xmin]), 
-    				lists:min([RYmin, Ymin]),
-    				lists:max([RXmax, Xmax]), 
-			      lists:max([RYmax, Ymax])},Data,HO).
-
+     case Data of
+         [] -> <<>>;
+         _ ->
+             {_, Proc, Port}=lists:last(Data),
+             Last = {RXmax, Proc, Port},
+             Data2=[{X, Y1 + Y2}||{X, Y1, Y2} <- [Last|Data]],
+             Data3 =lists:reverse([Last|lists:reverse(Data)]),
+             MinMax = minmax(Data2),
+             {Xmin, Ymin, Xmax, Ymax} = MinMax,
+             graf1(Width, Height,{	lists:min([RXmin, Xmin]),
+                                        lists:min([RYmin, Ymin]),
+                                        lists:max([RXmax, Xmax]),
+                                        lists:max([RYmax, Ymax])}, 
+                   Data3, HO)
+     end.
+     
 %% graph(Widht, Height, Data) = Image
 %% In:
 %%	Width = integer(),
@@ -84,7 +85,7 @@ error_graph(Width, Height, Text) ->
 
     
 graf1(Width,Height,{Xmin, Ymin, Xmax, Ymax},Data,HOffset) ->
-       % Calculate areas
+    % Calculate areas
     HO = HOffset,
     GrafArea   = #graph_area{x = HO, y = 4, width = Width -HO, height = Height - 17},
     XticksArea = #graph_area{x = HO, y = Height - 13, width = Width - HO, height = 13},
@@ -120,14 +121,24 @@ draw_graf(Im, Data, Colors, GA = #graph_area{x = X0, y = Y0, width = Width, heig
     Dx = (Width)/(Xmax - Xmin),
     Dy = (Height)/(Ymax),
     Plotdata = [{trunc(X0 + X*Dx - Xmin*Dx), trunc(Y0 + Height - Y1*Dy), trunc(Y0 + Height - (Y1 + Y2)*Dy)} || {X, Y1, Y2} <- Data],
-    draw_graf(Im, Plotdata, Colors, GA).
+    Data1=remove_duplicates(Plotdata),
+    draw_graf(Im, Data1, Colors, GA).
+
+
 
 draw_graf(Im, [{X1, Yproc1, Yport1}, {X2, Yproc2, Yport2}|Data], C, GA) when X2 - X1 < 1 ->
-    draw_graf(Im, [{X1, [{Yproc2, Yport2},{Yproc1, Yport1}]}|Data], C, GA);
-
+    if {Yproc1, Yport1} == {Yproc2, Yport2} ->
+            draw_graf(Im, [{X2, Yproc2, Yport2}|Data], C, GA);
+       true ->
+            draw_graf(Im, [{X1, [{Yproc2, Yport2},{Yproc1, Yport1}]}|Data], C, GA)
+    end;
 draw_graf(Im, [{X1, Ys1}, {X2, Yproc2, Yport2}|Data], C, GA) when X2 - X1 < 1, is_list(Ys1) ->
-    draw_graf(Im, [{X1, [{Yproc2, Yport2}|Ys1]}|Data], C, GA);
-
+    case lists:member({Yproc2, Yport2}, Ys1) of
+        true ->
+            draw_graf(Im, [{X1, Ys1}|Data], C, GA);
+        false ->
+            draw_graf(Im, [{X1, [{Yproc2, Yport2}|Ys1]}|Data], C, GA)
+    end;
 draw_graf(Im, [{X1, Yproc1, Yport1}, {X2, Yproc2, Yport2}|Data], C = {B, PrC, PoC}, GA = #graph_area{y = Y0, height = H})  ->
     GyZero  = trunc(Y0 + H),
     egd:filledRectangle(Im, {X1, GyZero}, {X2, Yproc1}, PrC),
@@ -274,37 +285,35 @@ draw_activity(Image, {Xmin, Xmax}, Area = #graph_area{width = Width}, Acts) ->
     White = egd:color({255, 255, 255}),
     Green = egd:color({0,250, 0}),
     Black = egd:color({0, 0, 0}),
+    Orange = egd:color({255, 165, 0}),
     Dx    = Width/(Xmax - Xmin),
-    draw_activity(Image, {Xmin, Xmax}, Area, {White, Green, Black}, Dx, Acts).
+    draw_activity(Image, {Xmin, Xmax}, Area, {White, Green, Black, Orange}, Dx, Acts).
 
-draw_activity(_, _, _, _, _, []) -> ok;
-draw_activity(Image, {Xmin, Xmax}, _Area = #graph_area{ height = Height, x = X0 }, {_Cw, Cg, _Cb}, Dx, 
+draw_activity(_, _, _, _, _, []) -> ok;  
+draw_activity(Image, {Xmin, Xmax}, _Area = #graph_area{ height = Height, x = X0 }, {_Cw, Cg, _Cb, Co}, Dx, 
               [{Xa1, active, InOutXas1}]) ->
-    Cr = egd:color(Image, {255, 165, 0}),
-    draw_in_out_activities(Image, Xmin,  X0, Height, {Cg, Cr}, 
+    draw_in_out_activities(Image, Xmin,  X0, Height, {Cg, Co}, 
                            Dx, Xa1, Xmax, {{X0, 0}, {X0, Height-1}}, InOutXas1);
 draw_activity(_, _, _, _, _, [_])-> ok;
-draw_activity(Image, {Xmin, Xmax}, Area = #graph_area{ height = Height, x = X0 }, {Cw, Cg, Cb}, Dx, 
+draw_activity(Image, {Xmin, Xmax}, Area = #graph_area{ height = Height, x = X0 }, {Cw, Cg, Cb,Co}, Dx, 
               [{Xa1, State, InOutXas1}, {Xa2, Act2, InOutXas2} | Acts]) ->
     X1 = erlang:trunc(X0 + Dx*Xa1 - Xmin*Dx),
     X2 = erlang:trunc(X0 + Dx*Xa2 - Xmin*Dx),
-    case X1 < X2 of 
-        true ->
+    if X1 < X2 ->
             case State of
                 inactive ->
                     egd:filledRectangle(Image, {X1, 0}, {X2, Height - 1}, Cw),
                     egd:rectangle(Image, {X1, 0}, {X2, Height - 1}, Cb),
-                    draw_activity(Image, {Xmin, Xmax}, Area, {Cw, Cg, Cb}, 
+                    draw_activity(Image, {Xmin, Xmax}, Area, {Cw, Cg, Cb, Co}, 
                                   Dx, [{Xa2, Act2, InOutXas2} | Acts]);
                 active ->
-                    Co = egd:color(Image, {255, 165, 0}),
                     draw_in_out_activities(Image, Xmin, X0, Height, {Cg, Co},
                                            Dx, Xa1, Xa2, {{X0, 0}, {X0, Height-1}}, InOutXas1),
-                    draw_activity(Image, {Xmin, Xmax}, Area, {Cw, Cg, Cb}, 
+                    draw_activity(Image, {Xmin, Xmax}, Area, {Cw, Cg, Cb, Co}, 
                                   Dx, [{Xa2, Act2, InOutXas2} | Acts])
             end;
-        false ->
-            draw_activity(Image, {Xmin, Xmax}, Area, {Cw, Cg, Cb}, 
+       true ->
+            draw_activity(Image, {Xmin, Xmax}, Area, {Cw, Cg, Cb, Co}, 
                           Dx, [{Xa2, Act2, InOutXas2} | Acts])
     end.
   
@@ -470,7 +479,7 @@ query_fun_time(Width, Height, {QueryStart, FunStart}, {QueryEnd, FunEnd}) ->
             egd:filledRectangle(Im, {X1, 0}, {X4, Height - 1}, PaleGreen),
             egd:filledRectangle(Im, {X4, 0}, {X2, Height - 1}, Grey);
        true ->
-            io:format("Unhanled case in percept_image:query_fun_time.\n")
+            io:format("Unhandled case in percept_image:query_fun_time.\n")
     end,
     Binary = egd:render(Im, png),
     egd:destroy(Im),
@@ -507,13 +516,13 @@ draw_cross_graf(Im, Data, Colors, GA = #graph_area{x = X0, y = Y0, width = Width
     Dy = (Height)/(Ymax),
     Plotdata = [{trunc(X0 + X*Dx - Xmin*Dx), trunc(Y0 + Height - Y1*Dy)} 
                 || {X, Y1, _} <- Data],
-    draw_cross_graft1(Im, Plotdata, Colors, GA).
+    draw_cross_graf1(Im, Plotdata, Colors, GA).
 
-draw_cross_graft1(Im, [{X1, Y1}|Data], C={B, _}, GA) ->
+draw_cross_graf1(Im, [{X1, Y1}|Data], C={B, _}, GA) ->
     egd:line(Im, {X1-3, Y1}, {X1+2, Y1}, B),
     egd:line(Im, {X1, Y1-3}, {X1, Y1+2}, B),  
-    draw_cross_graft1(Im, Data, C, GA);
-draw_cross_graft1(_Im, [], _, _) -> ok.
+    draw_cross_graf1(Im, Data, C, GA);
+draw_cross_graf1(_Im, [], _, _) -> ok.
 
 %% @spec minmax([{X, Y}]) -> {MinX, MinY, MaxX, MaxY}
 %%	X = number()
@@ -527,3 +536,22 @@ minmax(Data) ->
     Xs = [ X || {X,_Y} <- Data],
     Ys = [ Y || {_X, Y} <- Data],
     {lists:min(Xs), lists:min(Ys), lists:max(Xs), lists:max(Ys)}.
+
+%% NOT for general-purpose.
+remove_duplicates([]) ->
+    [];
+remove_duplicates([X|Tl]) ->
+    remove_duplicates(Tl, X, []).
+
+remove_duplicates([], Last, Acc) ->
+    lists:reverse([Last|Acc]);
+remove_duplicates([X], Last, Acc) ->
+    lists:reverse([X, Last|Acc]);
+remove_duplicates([X={X1, Y1, Y2}|Tl], Last={LastX1, LastY1, LastY2}, Acc) ->
+    if X1==LastX1 ->
+            MinY1=lists:min([Y1, LastY1]), 
+            MinY2=lists:min([Y2, LastY2]),
+            remove_duplicates(Tl, {LastX1, MinY1, MinY2}, Acc);
+       true ->
+            remove_duplicates(Tl, X, [Last|Acc])
+    end.
