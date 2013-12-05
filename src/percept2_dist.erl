@@ -10,7 +10,6 @@
 %% should be able to accept more flags.
 -type flag()::send|'receive'|s_group.
 
-%%@see ttb for possible values for Opts.
 -spec(start(Nodes::nodes(), Procs::procs(), Flags::[flag()], Opts::[term()])-> ok).
 start(Nodes, Procs, Flags, Opts) ->
     {TraceOpts, ModOrMFAs} = parse_profile_options(Flags),
