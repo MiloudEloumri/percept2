@@ -1,6 +1,6 @@
 -module(percept2_dot).
 
--export([gen_callgraph_img/5,
+-export([gen_callgraph_img/4,
          gen_process_tree_img/1,
          gen_process_comm_img/4,
          gen_callgraph_slice_img/4]).
@@ -18,9 +18,9 @@
 %%% --------------------------------%%%
 -spec(gen_callgraph_img(Pid::pid_value(), DestDir::file:filename(),
                         ImgFileBaseName::file:filename(),
-                        MinCallCount::integer(), MinTimePercent::integer()) 
+                        MinTimePercent::integer()) 
       -> ok|no_image|dot_not_found|{gen_svg_failed, Cmd::string()}).
-gen_callgraph_img(Pid, DestDir, ImgFileBaseName, MinCallCount, MinTimePercent) ->
+gen_callgraph_img(Pid, DestDir, ImgFileBaseName, MinTimePercent) ->
     Res=ets:select(fun_calltree, 
                    [{#fun_calltree{id = {Pid, '_','_'}, _='_'},
                      [],
@@ -30,21 +30,21 @@ gen_callgraph_img(Pid, DestDir, ImgFileBaseName, MinCallCount, MinTimePercent) -
         [] -> no_image;
         [Tree] -> 
             gen_callgraph_img_1(Pid, Tree, DestDir, ImgFileBaseName, 
-                                MinCallCount, MinTimePercent)
+                                MinTimePercent)
     end.
-   
+
 gen_callgraph_img_1(Pid, CallTree, DestDir, ImgFileBaseName, 
-                    MinCallCount, MinTimePercent) ->
+                    MinTimePercent) ->
     DotFileName = ImgFileBaseName++".dot",
     SvgFileName =gen_svg_file_name(ImgFileBaseName, DestDir),
-    fun_callgraph_to_dot(Pid, CallTree,DotFileName, MinCallCount, MinTimePercent),
+    fun_callgraph_to_dot(Pid, CallTree,DotFileName, MinTimePercent),
     dot_to_svg(DotFileName, SvgFileName).
 
 gen_svg_file_name(BaseName, DestDir) ->
     filename:join([DestDir, BaseName++".svg"]).
     
-fun_callgraph_to_dot(Pid, CallTree, DotFileName, MinCallCount, MinTimePercent) ->
-    Edges=gen_callgraph_edges(Pid, CallTree, MinCallCount, MinTimePercent),
+fun_callgraph_to_dot(Pid, CallTree, DotFileName, MinTimePercent) ->
+    Edges=gen_callgraph_edges(Pid, CallTree, MinTimePercent),
     MG = digraph:new(),
     digraph_add_edges(Edges, [], MG),
     to_dot(MG,DotFileName, Pid),
@@ -66,18 +66,22 @@ get_proc_life_time(Pid)->
     {ProcStartTs, ProcStopTs}.
 
 
-gen_callgraph_edges(Pid, CallTree, MinCallCount, MinTimePercent) ->
+gen_callgraph_edges(Pid, CallTree, MinTimePercent) ->
     {ProcStartTs, ProcStopTs} = get_proc_life_time(Pid),
     if CallTree#fun_calltree.cnt==0 ->
+            StartTs = case CallTree#fun_calltree.start_ts of 
+                          undefined -> ProcStartTs;
+                          Ts -> Ts
+                      end,
             CallTree1=CallTree#fun_calltree{cnt=1, end_ts=ProcStopTs, 
                                             acc_time=timer:now_diff(
-                                                       ProcStopTs, CallTree#fun_calltree.start_ts)},
-            gen_callgraph_edges_1({ProcStartTs, ProcStopTs}, CallTree1, MinCallCount, MinTimePercent);
+                                                       ProcStopTs, StartTs)},
+            gen_callgraph_edges_1({ProcStartTs, ProcStopTs}, CallTree1,MinTimePercent);
        true ->
-             gen_callgraph_edges_1({ProcStartTs, ProcStopTs}, CallTree, MinCallCount, MinTimePercent)
+            gen_callgraph_edges_1({ProcStartTs, ProcStopTs}, CallTree, MinTimePercent)
     end.
 
-gen_callgraph_edges_1({ProcStartTs, ProcStopTs},CallTree, MinCallCount, MinTimePercent) ->
+gen_callgraph_edges_1({ProcStartTs, ProcStopTs},CallTree, MinTimePercent) ->
     {_, CurFunc, _} = CallTree#fun_calltree.id,
     ProcTime = timer:now_diff(ProcStopTs, ProcStartTs),
     CurFuncTime = CallTree#fun_calltree.acc_time, 
@@ -91,8 +95,7 @@ gen_callgraph_edges_1({ProcStartTs, ProcStopTs},CallTree, MinCallCount, MinTimeP
                       ToFuncEndTs = Tree#fun_calltree.end_ts,
                       CurTimePercent = CurFuncTime/ProcTime,
                       ToTimePercent = ToFuncTime/ProcTime,
-                      case CallCount >= MinCallCount andalso 
-                           CurTimePercent >= MinTimePercent/100 andalso
+                      case CurTimePercent >= MinTimePercent/100 andalso
                            ToTimePercent >= MinTimePercent/100 of 
                           true ->
                               NewEdge = {{CurFunc,CurTimePercent, CurFuncEndTs},
@@ -100,7 +103,7 @@ gen_callgraph_edges_1({ProcStartTs, ProcStopTs},CallTree, MinCallCount, MinTimeP
                                          CallCount},
                               [[NewEdge|gen_callgraph_edges_1(
                                           {ProcStartTs, ProcStopTs}, 
-                                          Tree, MinCallCount, MinTimePercent)]
+                                          Tree, MinTimePercent)]
                                |Acc];
                           false -> Acc
                       end
@@ -461,6 +464,11 @@ digraph_add_edge_1(MG, From, To, Label) ->
 
 format_process_node(RegName, _) when is_atom(RegName) ->
     format_node(RegName, fun atom_to_list/1);
+format_process_node({RegName, Node}, _) when is_atom(RegName) and is_atom(Node) ->
+    format_node({RegName,Node}, 
+                fun({R, N}) -> 
+                        atom_to_list(N)++":"++atom_to_list(R)
+                end);
 format_process_node(Pid={pid, {_P1, _P2, _P3}}, CleanPid) ->
     case ets:lookup(pdb_info,Pid) of 
         [Info] ->
@@ -484,7 +492,7 @@ format_process_vertex({PidStr, Name, Entry}) ->
     lists:flatten(io_lib:format("~s; ~p;\\n", [PidStr, Name])) ++
         format_entry(Entry);
 format_process_vertex(Other)  ->
-    io_lib:format("~p", [Other]).
+    io_lib:format("~s", [Other]).
 
 format_process_tree_edge(Pid1, Pid2,Label, CleanPid) ->
     Pid1Str= format_proc_node(Pid1, CleanPid),
@@ -496,6 +504,8 @@ format_process_tree_edge(Pid1, Pid2,Label, CleanPid) ->
 
 format_proc_node(Pid, _) when is_atom(Pid) ->
     atom_to_list(Pid);
+format_proc_node({Pid, Node}, _) when is_atom(Pid) andalso is_atom(Node) ->
+    atom_to_list(Node)++":"++atom_to_list(Pid);
 format_proc_node(Pid, CleanPid) ->
     case CleanPid of
         true ->
@@ -594,7 +604,8 @@ proc_comm_to_dot(Tab, DotFileName, MinSends, MinSize) ->
     Edges = gen_proc_comm_edges(Tab, MinSends, MinSize),
     MG = digraph:new(),
     proc_comm_add_edges(Edges, MG),
-    proc_to_dot(MG,DotFileName,"proc_comm", true),
+    CleanPid =  percept2_db:select({system, nodes})==1,
+    proc_to_dot(MG,DotFileName,"proc_comm", CleanPid),
     digraph:delete(MG).
 
 gen_proc_comm_edges(Tab, MinSends, MinSize) ->
@@ -640,3 +651,102 @@ proc_to_dot(MG,OutFileName, GraphName,CleanPid) ->
     ok = file:write_file(OutFileName, list_to_binary(String)).
  
    
+%%% --------------------------------------------%%%
+%%% 	node communication image generation. %%%
+%%% --------------------------------------------%%%
+
+-spec(gen_node_comm_img(DestDir::file:filename(),
+                        ImgFileBaseName::string())
+      -> ok|no_image|dot_not_found|{gen_svg_failed, Cmd::string()}).
+gen_node_comm_img(DestDir, ImgFileBaseName) ->
+    case ets:info(inter_proc,size) of 
+        0 -> 
+            no_image;
+        _ ->
+            Tab=ets:new(tmp_inter_node_tab, [named_table, protected, set]),
+            ets:foldl(fun process_a_node_send/2, Tab, inter_proc),
+            DotFileName = ImgFileBaseName++".dot",
+            SvgFileName =gen_svg_file_name(ImgFileBaseName, DestDir),
+            node_comm_to_dot(Tab,DotFileName),
+            ets:delete(Tab),
+            dot_to_svg(DotFileName, SvgFileName)
+    end.
+
+process_a_node_send('$end_of_table', Tab) ->
+    Tab;    
+process_a_node_send(Send, Tab) ->
+    FromNode = element(2, Send#inter_proc.timed_from),
+    ToNode=element(1, Send#inter_proc.to),
+    MsgSize = Send#inter_proc.msg_size,
+    case FromNode == ToNode orelse FromNode==nonode orelse 
+        ToNode==nonode of
+        true ->
+            ok;
+        false ->
+            case ets:lookup(Tab, {FromNode, ToNode}) of 
+                [] ->
+                    ets:insert(Tab, {{FromNode, ToNode}, {1, MsgSize}});
+                [I] ->
+                    {Key, {No, Size}} = I,
+                    ets:update_element(Tab, Key, {2, {No+1, Size+MsgSize}})
+            end
+    end,
+    Tab.
+    
+
+node_comm_to_dot(Tab, DotFileName) ->
+    Edges = gen_node_comm_edges(Tab),
+    MG = digraph:new(),
+    node_comm_add_edges(Edges, MG),
+    node_comm_to_dot(MG,DotFileName,"node_comm"),
+    digraph:delete(MG).
+
+node_comm_to_dot(MG,OutFileName,GraphName) ->
+    Edges =[digraph:edge(MG, X) || X <- digraph:edges(MG)],
+    Nodes = digraph:vertices(MG),
+    Start = ["digraph ",GraphName ," {"],
+    VertexList = [format_node_node(N)||N <- Nodes],
+    End = ["graph [", GraphName, "=", GraphName, "]}"],
+    EdgeList = [format_edge(X, Y, Label) ||{_, X, Y, Label} <- Edges],
+    String = [Start, VertexList, EdgeList, End],
+    ok = file:write_file(OutFileName, list_to_binary(String)).
+ 
+
+format_node_node(Node) ->
+    String = atom_to_list(Node),
+    {Width, Heigth} = calc_dim(String),
+    W = (Width div 7 + 1) * 0.55,
+    H = Heigth * 0.4,
+    SL = io_lib:format("~f", [W]),
+    SH = io_lib:format("~f", [H]),
+    ["\"", String, "\"", " [width=", 
+     SL, " heigth=", SH, " ", "", "];\n"].
+ 
+
+gen_node_comm_edges(Tab) ->
+    ets:foldl(fun(Elem, Acc) ->
+                      case Elem of 
+                          '$end_of_table' -> Acc;
+                          {{From, To}, {Times, TotalSize}} ->
+                              AvgSize = TotalSize div Times, 
+                              NewEdge = {From,To,{Times, AvgSize}},
+                              [NewEdge|Acc]
+                          end                                         
+              end, [], Tab).
+
+node_comm_add_edges(Edges, MG)->
+    [node_comm_add_an_edge(MG, E)||E<-Edges].
+
+node_comm_add_an_edge(MG, _E={From, To, Label={_Times, _Size}}) ->
+    case digraph:vertex(MG,From) of 
+        false ->
+            digraph:add_vertex(MG, From);
+        _ -> ok
+    end,
+    case digraph:vertex(MG, To) of 
+        false ->
+            digraph:add_vertex(MG, To);
+        _-> ok
+    end,
+    digraph:add_edge(MG, From, To, Label).
+

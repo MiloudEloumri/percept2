@@ -74,7 +74,9 @@
  
 -type filespec()::file:filename()|
                   {file:filename(), wrap, Suffix::string(),
-                   WrapSize::pos_integer(), WrapCnt::pos_integer()}.
+                   WrapSize::pos_integer()} |
+                  {file:filename(), wrap, Suffix::string(),
+                   WrapSize::pos_integer(), MaxFileCnt::pos_integer()}.
 
 -type trace_profile_option()::'procs_basic'|           %% profile basic process activities including
                                                        %% spawn, exit and register.
@@ -463,7 +465,7 @@ parse_and_insert_loop(Filename, Pid, Ref, SubDB,T0, Parent) ->
     receive
 	{'DOWN',Ref,process, Pid, noproc} ->
 	    Msg=lists:flatten(io_lib:format(
-                                "Incorrect file or malformed trace file: ~s~n", [Filename])),
+                                "Incorrect file or malformed trace file: ~p~n", [Filename])),
             Parent ! {error, Msg};
     	{parse_complete, {Pid, Count}} ->
             Pid ! {ack, self()},
@@ -670,3 +672,4 @@ writeable(F) ->
             end;
         _ -> false
     end.
+

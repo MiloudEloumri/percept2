@@ -52,6 +52,7 @@
 
 -record(information, {
           id			 :: pid_value() | port()|special_atom()|{pid, special_atom()},
+          node = nonode          :: atom(),
           name = undefined	 :: atom()| string()|'undefined'|special_atom(), 
           entry = undefined	 :: true_mfa()|'undefined'|'suspend'|'garbage_collect'|
                                     special_atom()|
@@ -64,8 +65,10 @@
           children = []		 :: [pid_value()]|special_atom(),
           msgs_received ={0, 0}  :: {non_neg_integer(), non_neg_integer()}|special_atom(),
           msgs_sent     ={0, 0}  :: {non_neg_integer(), non_neg_integer()}|special_atom(),
-          accu_runtime = 0       :: integer()|special_atom(),
-          hidden_pids = []       :: [pid_value()]|special_atom()
+          gc_time      = 0       :: non_neg_integer()|special_atom(),
+          accu_runtime = 0       :: non_neg_integer()|special_atom(),
+          hidden_pids = []       :: [pid_value()]|special_atom(),
+          hidden_proc_trees=[]    :: [term()]|special_atom()
 	}).
  
 -record(inter_proc, {
@@ -123,7 +126,7 @@
 
 -type s_group_op()::new_s_group|delete_s_group|add_nodes|remove_nodes.
 
--record(s_group, 
+-record(s_group_info, 
         {timed_node:: {timestamp(),node()},
          op :: {s_group_op(), [term()]}
         }).
