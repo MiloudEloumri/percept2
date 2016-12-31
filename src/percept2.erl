@@ -278,8 +278,10 @@ stop_profile() ->
     percept2_profile:stop().
 
 %%@doc Parallel analysis of trace files. See the <a href="overview-summary.html">Overview</a> page for examples.
--spec analyze(FileNames :: [file:filename()]) ->
+-spec analyze(FileNames :: file:filename() | [file:filename()]) ->
                      'ok' | {'error', any()}.
+analyze([H | _] = Filename) when not is_list(H) ->
+    analyze([Filename]);
 analyze(FileNames) ->
     case percept2_db:start(FileNames) of
 	{started, FileNameSubDBPairs} ->
@@ -453,7 +455,7 @@ stop_webserver(Port) ->
 %%@hidden
 parse_and_insert(Filename,SubDB, Parent) ->
     io:format("Parsing: ~p ~n", [Filename]),
-    T0 = erlang:now(),
+    T0 = erlang:timestamp(),
     Parser = mk_trace_parser(self(), SubDB),
     ?dbg(0,"Parser Pid:\n~p\n", [Parser]),
     Pid=dbg:trace_client(file, Filename, Parser),
@@ -471,7 +473,7 @@ parse_and_insert_loop(Filename, Pid, Ref, SubDB,T0, Parent) ->
             Parent ! {error, Msg};
     	{parse_complete, {Pid, Count}} ->
             Pid ! {ack, self()},
-            T1 = erlang:now(),
+            T1 = erlang:timestamp(),
 	    io:format("Parsed ~p entries from ~p in ~p s.~n", [Count, Filename, ?seconds(T1, T0)]),
             Parent ! {self(), done};
 	{'DOWN',Ref, process, Pid, normal} -> 
